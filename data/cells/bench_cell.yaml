@@ -1,0 +1,37 @@
+# A single-robot bench cell: the simplest arrangement that actually welds.
+#
+# The robot is floor-mounted at the origin and the bench sits in front of it.
+# Bench height and distance are the two numbers that decide whether a part can
+# be welded downhand, so they are the first things to adjust when the planner
+# reports poor reach.
+name: Bench cell
+robot: kuka_kr16_2
+
+robot_base:
+  xyz: [0.0, 0.0, 0.0]
+  rpy_deg: [0.0, 0.0, 0.0]
+
+torch:
+  # Gooseneck MIG torch: 350 mm flange to contact tip, bent 22 deg.
+  length_mm: 350.0
+  angle_deg: 22.0
+  stickout_mm: 15.0
+
+fixture:
+  name: Welding bench
+  kind: bench
+  table_z_mm: 750.0
+  # The bench must stand clear of the robot's own column. A KR 16 base is
+  # about 300 mm across; with the bench spanning x = 500..1500 there is
+  # 200 mm of clearance, which is what a real layout gives it.
+  table_size_mm: [1000.0, 800.0]
+  table_origin: [1000.0, 0.0, 0.0]
+  load_capacity_kg: 300.0
+  clamps:
+    - { id: c1, name: front left,  position: [600.0, -320.0, 750.0], approach: [0, 0, 1], clearance_mm: 45.0, height_mm: 120.0 }
+    - { id: c2, name: front right, position: [600.0,  320.0, 750.0], approach: [0, 0, 1], clearance_mm: 45.0, height_mm: 120.0 }
+    - { id: c3, name: back left,   position: [1400.0, -320.0, 750.0], approach: [0, 0, 1], clearance_mm: 45.0, height_mm: 120.0 }
+    - { id: c4, name: back right,  position: [1400.0,  320.0, 750.0], approach: [0, 0, 1], clearance_mm: 45.0, height_mm: 120.0 }
+
+obstacles:
+  - { id: pillar, name: wire feeder pillar, kind: fence, size: [200.0, 200.0, 1800.0], centre: [-500.0, 700.0, 900.0] }

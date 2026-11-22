@@ -1,0 +1,67 @@
+# A dedicated jig ("maschera") for one family of parts.
+#
+# This is the case a bench cannot cover. A jig locates the part against fixed
+# datums so it sits in the same place every time, which is what makes an
+# offline-planned program repeatable: the planner assumes the part is where
+# the fixture says, and only a jig makes that true.
+#
+# The datums below are the locating features. Each is a point and the
+# direction its locating face looks in:
+#
+#   - three on the base plane fix height and tilt (a three-point rest, which
+#     cannot rock the way four points can);
+#   - two against one side fix one direction and rotation;
+#   - one against the end fixes the last direction.
+#
+# That is the 3-2-1 location scheme, and it constrains all six degrees of
+# freedom with no redundancy -- which is why it is the standard one.
+name: Jig cell
+robot: fanuc_arcmate_100id
+
+robot_base:
+  xyz: [0.0, 0.0, 300.0]
+  rpy_deg: [0.0, 0.0, 0.0]
+
+torch:
+  length_mm: 330.0
+  angle_deg: 22.0
+  stickout_mm: 15.0
+
+fixture:
+  name: Weldment jig
+  kind: jig
+  table_z_mm: 800.0
+  table_size_mm: [900.0, 700.0]
+  table_origin: [850.0, 0.0, 0.0]
+  load_capacity_kg: 150.0
+
+  # A jig is specific to a part family, and these locators are placed for a
+  # plate assembly of roughly 200 x 100 mm. That is not a limitation of the
+  # software, it is what a jig is: re-tool it for a different part and these
+  # numbers change with it. A part that does not reach a locator is reported
+  # as not located rather than quietly welded in the wrong place.
+  datums:
+    # Primary: three rests on the base plane, facing up. Three, not four --
+    # three points cannot rock, four can.
+    - { position: [780.0, -30.0, 800.0], normal: [0, 0, 1] }
+    - { position: [920.0, -30.0, 800.0], normal: [0, 0, 1] }
+    - { position: [850.0,  30.0, 800.0], normal: [0, 0, 1] }
+    # Secondary: two against the near side, facing +Y. Fixes one direction
+    # and rotation about the primary normal.
+    # Note the height: these must bear on the base plate itself, which is
+    # 8 mm thick. Put them higher and they locate against thin air, which the
+    # seating check reports rather than letting it pass.
+    - { position: [800.0, -50.0, 804.0], normal: [0, 1, 0] }
+    - { position: [900.0, -50.0, 804.0], normal: [0, 1, 0] }
+    # Tertiary: one end stop, facing +X. Fixes the last direction.
+    - { position: [750.0, 0.0, 804.0], normal: [1, 0, 0] }
+
+  clamps:
+    # Clamps clear of the seams: they hold the part down outside the weld
+    # zone, which is what the placement's clamp-clearance check enforces.
+    - { id: j1, name: toggle clamp 1, position: [770.0, 140.0, 800.0], approach: [0, 0, 1], clearance_mm: 40.0, height_mm: 110.0 }
+    - { id: j2, name: toggle clamp 2, position: [930.0, 140.0, 800.0], approach: [0, 0, 1], clearance_mm: 40.0, height_mm: 110.0 }
+    - { id: j3, name: end clamp,      position: [1040.0, 0.0, 810.0], approach: [-1, 0, 0], clearance_mm: 40.0, height_mm: 90.0 }
+
+obstacles:
+  - { id: jig_frame, name: jig base frame, kind: jig, size: [900.0, 700.0, 700.0], centre: [850.0, 0.0, 420.0] }

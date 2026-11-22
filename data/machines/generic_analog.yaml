@@ -1,0 +1,41 @@
+# Lowest common denominator: a power source driven by two analog outputs and a
+# few relays. Works with any machine that accepts remote current and voltage
+# references, which covers most older inverters and every "robot interface"
+# retrofit box.
+name: Generic analog power source
+vendor: generic
+interface: analog
+description: >
+  Two 0-10 V references plus discrete arc-on, gas test and wire inch. No
+  synergic job numbers: the robot sets current and voltage directly, so the
+  procedure's numbers go out as-is.
+
+job_selection:
+  mode: none
+
+analog:
+  current:
+    signal: AO1
+    unit: V
+    value_min: 0.0
+    value_max: 500.0
+    raw_min: 0
+    raw_max: 32767
+  voltage:
+    signal: AO2
+    unit: V
+    value_min: 0.0
+    value_max: 50.0
+    raw_min: 0
+    raw_max: 32767
+
+digital:
+  arc_on: DO1
+  gas_test: DO2
+  wire_inch: DO3
+  robot_ready: DO4
+
+limits:
+  current_a: [30.0, 500.0]
+  voltage_v: [10.0, 45.0]
+  wire_speed_m_min: [1.0, 25.0]

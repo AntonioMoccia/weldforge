@@ -1,0 +1,36 @@
+# Robot plus a two-axis positioner.
+#
+# The positioner is the reason this layout costs more and welds better: it
+# turns the part so seams that would be vertical or overhead become downhand,
+# which is faster, sounder and needs no weaving. The planner uses the tilt and
+# rotate axes to put each seam in the best position it can reach.
+name: Positioner cell
+robot: abb_irb1520id
+
+robot_base:
+  xyz: [0.0, 0.0, 400.0]
+  rpy_deg: [0.0, 0.0, 0.0]
+
+torch:
+  length_mm: 320.0
+  angle_deg: 22.0
+  stickout_mm: 15.0
+
+fixture:
+  name: Two-axis positioner faceplate
+  kind: positioner
+  table_z_mm: 900.0
+  table_size_mm: [700.0, 700.0]
+  table_origin: [1000.0, 0.0, 0.0]
+  load_capacity_kg: 250.0
+  clamps:
+    - { id: p1, name: faceplate clamp 1, position: [900.0, -200.0, 900.0], approach: [0, 0, 1], clearance_mm: 40.0, height_mm: 90.0 }
+    - { id: p2, name: faceplate clamp 2, position: [1100.0, 200.0, 900.0], approach: [0, 0, 1], clearance_mm: 40.0, height_mm: 90.0 }
+
+external_axes:
+  # Tilt about the cell Y axis, then rotate about the faceplate normal.
+  - { name: tilt,   kind: rotary, axis: [0, 1, 0], origin: [1000.0, 0.0, 900.0], limit_deg: [-120, 120], max_speed: 0.5, coupled: true }
+  - { name: rotate, kind: rotary, axis: [0, 0, 1], origin: [1000.0, 0.0, 900.0], limit_deg: [-360, 360], max_speed: 1.0, coupled: true }
+
+obstacles:
+  - { id: positioner_body, name: positioner housing, kind: jig, size: [500.0, 700.0, 800.0], centre: [1000.0, 0.0, 450.0] }

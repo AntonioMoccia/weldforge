@@ -1,0 +1,15 @@
+# Plan a job: procedures, placement, paths and simulation.
+string part_id
+string cell                     # cell name; empty = node default
+string base_material            # e.g. S355; empty = node default
+float64 leg_ratio               # fillet leg as a fraction of thickness, 0 = default
+float64 wire_diameter           # m, 0 = chosen from thickness
+string[] seam_ids               # weld only these; empty = all
+bool do_placement
+bool do_paths
+bool do_simulate
+uint16 max_seams                # 0 = no limit
+---
+bool success
+string message
+weldforge_msgs/WeldPlan plan

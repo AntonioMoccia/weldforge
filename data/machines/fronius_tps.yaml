@@ -1,0 +1,82 @@
+# Fronius TPS/i with a robot interface over Profinet.
+#
+# The machine is synergic: the robot selects a stored job (characteristic) and
+# then trims it, rather than dictating current and voltage. Picking the job is
+# the real work -- it is keyed on wire diameter, gas and material -- after which
+# wire feed sets the operating point and the two corrections fine-tune arc
+# length and dynamics.
+name: Fronius TPS 400i
+vendor: Fronius
+interface: profinet
+description: >
+  Synergic job selection plus wire-feed command and the two standard
+  corrections. Job numbers below are the usual factory characteristic set for
+  steel and stainless; a real cell must be re-mapped to its own job list.
+
+job_selection:
+  mode: synergic_job
+  # First match wins; `mode` is the transfer mode from the procedure.
+  jobs:
+    - { wire_diameter_mm: 0.8, gas: M21-ArC-18, group: carbon_steel, mode: short_arc, job: 1 }
+    - { wire_diameter_mm: 1.0, gas: M21-ArC-18, group: carbon_steel, mode: short_arc, job: 2 }
+    - { wire_diameter_mm: 1.0, gas: M21-ArC-18, group: carbon_steel, mode: spray, job: 3 }
+    - { wire_diameter_mm: 1.0, gas: M21-ArC-18, group: carbon_steel, mode: pulse, job: 4 }
+    - { wire_diameter_mm: 1.2, gas: M21-ArC-18, group: carbon_steel, mode: short_arc, job: 5 }
+    - { wire_diameter_mm: 1.2, gas: M21-ArC-18, group: carbon_steel, mode: spray, job: 6 }
+    - { wire_diameter_mm: 1.2, gas: M21-ArC-18, group: carbon_steel, mode: pulse, job: 7 }
+    - { wire_diameter_mm: 1.2, gas: M21-ArC-18, group: carbon_steel, mode: double_pulse, job: 8 }
+    - { wire_diameter_mm: 1.6, gas: M21-ArC-18, group: carbon_steel, mode: spray, job: 9 }
+    - { wire_diameter_mm: 1.0, gas: M12-ArC-2, group: austenitic_stainless, mode: pulse, job: 21 }
+    - { wire_diameter_mm: 1.2, gas: M12-ArC-2, group: austenitic_stainless, mode: pulse, job: 22 }
+    - { wire_diameter_mm: 1.2, gas: M12-ArC-2, group: austenitic_stainless, mode: short_arc, job: 23 }
+  fallback_job: 5
+  job_signal: JOB_NUMBER
+  job_raw_min: 0
+  job_raw_max: 99
+
+analog:
+  # On a synergic machine the wire feed IS the operating point; current and
+  # voltage follow from the characteristic.
+  wire_speed:
+    signal: AO_WIRE
+    unit: m/min
+    value_min: 0.0
+    value_max: 25.0
+    raw_min: 0
+    raw_max: 32767
+  current:
+    signal: AO_CURRENT_MONITOR
+    unit: A
+    value_min: 0.0
+    value_max: 500.0
+    raw_min: 0
+    raw_max: 32767
+    read_only: true
+
+corrections:
+  arc_length:
+    signal: AO_ARC_CORR
+    value_min: -10.0
+    value_max: 10.0
+    raw_min: -32768
+    raw_max: 32767
+  dynamic:
+    signal: AO_DYN_CORR
+    value_min: -10.0
+    value_max: 10.0
+    raw_min: -32768
+    raw_max: 32767
+
+digital:
+  arc_on: DO_WELD_START
+  gas_test: DO_GAS_TEST
+  wire_inch: DO_WIRE_FWD
+  wire_retract: DO_WIRE_BWD
+  touch_sensing: DO_TOUCH
+  robot_ready: DO_ROBOT_READY
+  main_current_signal: DI_CURRENT_FLOW
+
+limits:
+  current_a: [30.0, 400.0]
+  voltage_v: [10.0, 40.0]
+  wire_speed_m_min: [0.5, 25.0]

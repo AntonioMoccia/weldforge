@@ -1,0 +1,20 @@
+# How MoveIt reaches the arm: through the ros2_control trajectory controller,
+# never by commanding joints itself. The controller owns the limits and the
+# safety, and bypassing it bypasses those.
+moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
+
+moveit_simple_controller_manager:
+  controller_names:
+    - joint_trajectory_controller
+
+  joint_trajectory_controller:
+    type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    default: true
+    joints:
+      - joint_1
+      - joint_2
+      - joint_3
+      - joint_4
+      - joint_5
+      - joint_6

@@ -1,0 +1,20 @@
+# A neutral 6-axis arm for testing and for a cell whose robot is not yet
+# chosen. Round numbers so hand-checking the kinematics is easy: the fully
+# extended reach is exactly 250 + 700 + 700 = 1650 mm to the wrist centre.
+name: Generic 6-axis welding arm
+vendor: generic
+reach_mm: 1650
+payload_kg: 10.0
+wrist: spherical
+notes:
+  - "Round-number geometry for tests and for sizing a cell before the robot is picked."
+
+joints:
+  - { name: J1, alpha: 0.0,   a: 0.0,   d: 500.0, limit_deg: [-180, 180], max_speed_deg_s: 180 }
+  - { name: J2, alpha: -90.0, a: 250.0, d: 0.0,   limit_deg: [-120, 120], max_speed_deg_s: 180 }
+  - { name: J3, alpha: 0.0,   a: 700.0, d: 0.0,   limit_deg: [-150, 150], max_speed_deg_s: 180 }
+  - { name: J4, alpha: -90.0, a: 0.0,   d: 700.0, limit_deg: [-350, 350], max_speed_deg_s: 350 }
+  - { name: J5, alpha: 90.0,  a: 0.0,   d: 0.0,   limit_deg: [-125, 125], max_speed_deg_s: 350 }
+  - { name: J6, alpha: -90.0, a: 0.0,   d: 150.0, limit_deg: [-350, 350], max_speed_deg_s: 600 }
+
+home_deg: [0, -60, 60, 0, 60, 0]

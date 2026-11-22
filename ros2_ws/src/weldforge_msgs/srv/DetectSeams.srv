@@ -1,0 +1,11 @@
+# Recognise the weld seams of a loaded part.
+string part_id
+float64 min_length              # m, 0 = node default (5 mm)
+float64 min_confidence          # 0 = node default (0.25)
+bool include_geometry           # fill every seam's station poses
+---
+bool success
+string message
+weldforge_msgs/WeldSeam[] seams
+float64 total_length            # m
+float64 seconds

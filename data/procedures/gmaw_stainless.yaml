@@ -1,0 +1,90 @@
+# GMAW for austenitic stainless steel (304/316L).
+#
+# Differences from carbon steel that matter and are encoded here: a tri-mix or
+# low-CO2 gas to keep carbon pick-up down, lower heat input and a hard
+# interpass ceiling to avoid sensitisation and chromium carbide precipitation,
+# and a slightly lower deposition efficiency.
+
+process: GMAW
+base_material_group: austenitic_stainless   # ISO/TR 15608 group 8
+filler: G 19 9 L Si
+gas: M12-ArC-2
+gas_flow_l_min: 16.0
+deposition_efficiency: 0.93
+thermal_efficiency: 0.80
+
+wires:
+  - diameter_mm: 0.8
+    min_current_a: 50.0
+    max_current_a: 140.0
+    modes: [short_arc, pulse]
+    curve:
+      - [60.0, 16.0, 2.6]
+      - [100.0, 18.5, 5.2]
+      - [140.0, 21.0, 8.4]
+
+  - diameter_mm: 1.0
+    min_current_a: 70.0
+    max_current_a: 260.0
+    modes: [short_arc, spray, pulse]
+    curve:
+      - [90.0, 17.5, 3.4]
+      - [150.0, 21.0, 6.8]
+      - [220.0, 26.5, 11.2]
+
+  - diameter_mm: 1.2
+    min_current_a: 100.0
+    max_current_a: 320.0
+    modes: [short_arc, spray, pulse]
+    curve:
+      - [120.0, 18.0, 2.9]
+      - [180.0, 22.0, 5.4]
+      - [250.0, 28.0, 8.8]
+
+mode_selection:
+  short_arc_max_current_a: 170.0
+  out_of_position_modes: [short_arc, pulse]
+
+target_travel_speed_mm_s:
+  PA: 7.0
+  PB: 6.0
+  PC: 5.0
+  PD: 3.5
+  PE: 3.5
+  PF: 3.0
+  PG: 5.5
+
+travel_speed_limits_mm_s: [2.0, 16.0]
+
+max_leg_per_pass_mm:
+  PA: 7.0
+  PB: 6.0
+  PC: 5.0
+  PD: 4.0
+  PE: 4.0
+  PF: 4.0
+  PG: 5.0
+
+torch_angles:
+  fillet:   { work: 45.0, travel: -5.0 }
+  tee:      { work: 45.0, travel: -5.0 }
+  lap:      { work: 60.0, travel: -5.0 }
+  butt:     { work: 90.0, travel: 0.0 }
+  corner:   { work: 45.0, travel: -5.0 }
+  edge:     { work: 90.0, travel: 0.0 }
+  plug:     { work: 90.0, travel: 0.0 }
+  unknown:  { work: 45.0, travel: -5.0 }
+
+weave:
+  PF: { shape: triangular, amplitude_mm: 3.0, frequency_hz: 1.4, dwell_ms: 120.0 }
+  PD: { shape: zigzag, amplitude_mm: 2.0, frequency_hz: 2.0, dwell_ms: 60.0 }
+  PE: { shape: zigzag, amplitude_mm: 2.0, frequency_hz: 2.0, dwell_ms: 60.0 }
+
+stickout_mm:
+  short_arc: 12.0
+  spray: 16.0
+  pulse: 14.0
+
+gap_compensation:
+  per_mm_travel_factor: -0.15
+  max_gap_mm: 3.0

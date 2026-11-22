@@ -1,0 +1,22 @@
+# Power source parameters.
+#
+# `arc_enabled` is the master interlock and ships FALSE. Nothing this software
+# does can strike an arc until a human sets it true, which is deliberate: the
+# planner is a program, and programs have bugs.
+/**/weldforge_welder_io:
+  ros__parameters:
+    # simulated | digital_io | modbus
+    backend: simulated
+    # Profile from data/machines/*.yaml -- defines the fieldbus mapping.
+    machine_profile: generic_analog
+
+    arc_enabled: false
+
+    arc_timeout_s: 2.0
+    gas_preflow_s: 0.3
+    gas_postflow_s: 1.0
+    publish_rate_hz: 20.0
+
+    # Simulated arc behaviour.
+    sim_strike_delay_s: 0.25
+    sim_noise_fraction: 0.03

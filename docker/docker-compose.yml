@@ -1,0 +1,64 @@
+# Development and demonstration stack.
+#
+#   docker compose -f docker/docker-compose.yml build
+#   docker compose -f docker/docker-compose.yml run --rm dev
+#
+# The GUI containers need an X server on the host:
+#   macOS   XQuartz, then `xhost +localhost`
+#   Linux   `xhost +local:docker`
+#   Windows VcXsrv with "disable access control"
+services:
+  dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: weldforge:jazzy
+    container_name: weldforge_dev
+    stdin_open: true
+    tty: true
+    network_mode: host
+    ipc: host
+    environment:
+      - DISPLAY=${DISPLAY:-host.docker.internal:0}
+      - QT_X11_NO_MITSHM=1
+      - LIBGL_ALWAYS_SOFTWARE=1
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-42}
+    volumes:
+      # Live source, so an edit does not need a rebuild.
+      - ../src:/opt/weldforge/src:ro
+      - ../data:/opt/weldforge/data:ro
+      - ../ros2_ws/src:/ws/src
+      # Somewhere to drop CAD files and pick up generated programs.
+      - ../work:/work
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    command: bash
+
+  # The cell: planner, welder I/O and execution, with the arc inhibited.
+  cell:
+    image: weldforge:jazzy
+    container_name: weldforge_cell
+    depends_on: [dev]
+    network_mode: host
+    ipc: host
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-42}
+    volumes:
+      - ../src:/opt/weldforge/src:ro
+      - ../data:/opt/weldforge/data:ro
+      - ../work:/work
+    command: >
+      bash -lc "ros2 launch weldforge_cell cell.launch.py arc_enabled:=false"
+
+  # The REST API, for the CAD plugins.
+  api:
+    image: weldforge:jazzy
+    container_name: weldforge_api
+    ports: ["8000:8000"]
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-42}
+    volumes:
+      - ../src:/opt/weldforge/src:ro
+      - ../data:/opt/weldforge/data:ro
+      - ../work:/work
+    command: >
+      bash -lc "weldforge serve --host 0.0.0.0 --port 8000"

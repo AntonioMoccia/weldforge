@@ -1,0 +1,116 @@
+<?xml version="1.0"?>
+<!--
+  Gazebo world for a welding cell.
+
+  What this simulation is for, and what it is not. It verifies motion: that
+  the planned trajectories run, that the arm does not hit the bench or the
+  clamps, and that the cycle time is what was quoted. It does not simulate the
+  arc. Weld pool physics, heat flow and distortion are not things a rigid-body
+  engine models, and pretending otherwise would give a confidence the
+  simulation has not earned.
+
+  The arc is simulated at the I/O level instead, by the welder node's
+  `simulated` backend: striking delays, arc establishment, dropout and
+  measured current and voltage. That is the behaviour the execution logic has
+  to get right, and it is the part worth testing.
+-->
+<sdf version="1.9">
+  <world name="welding_cell">
+
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <gravity>0 0 -9.81</gravity>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>-0.4 0.3 -0.9</direction>
+    </light>
+
+    <!-- Shop floor -->
+    <model name="floor">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>30 30</size></plane></geometry>
+          <surface>
+            <friction><ode><mu>0.9</mu><mu2>0.9</mu2></ode></friction>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>30 30</size></plane></geometry>
+          <material>
+            <ambient>0.25 0.26 0.28 1</ambient>
+            <diffuse>0.35 0.36 0.38 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Safety fence, so a plan that swings the arm out of the cell is visible -->
+    <model name="fence_rear">
+      <static>true</static>
+      <pose>0 -1.6 1.0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>4.0 0.08 2.0</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>4.0 0.08 2.0</size></box></geometry>
+          <material>
+            <ambient>0.8 0.6 0.1 0.35</ambient>
+            <diffuse>0.9 0.7 0.1 0.35</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="fence_side">
+      <static>true</static>
+      <pose>-1.3 0 1.0 0 0 1.5708</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>3.2 0.08 2.0</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>3.2 0.08 2.0</size></box></geometry>
+          <material>
+            <ambient>0.8 0.6 0.1 0.35</ambient>
+            <diffuse>0.9 0.7 0.1 0.35</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Wire feeder and power source, as an obstacle the arm must respect -->
+    <model name="power_source">
+      <static>true</static>
+      <pose>-0.5 0.7 0.45 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.5 0.7 0.9</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.5 0.7 0.9</size></box></geometry>
+          <material>
+            <ambient>0.1 0.2 0.35 1</ambient>
+            <diffuse>0.15 0.3 0.5 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

@@ -1,0 +1,16 @@
+# Read a CAD file and measure it.
+string path                     # absolute path readable by the planner node
+string name                     # optional label; defaults to the file stem
+float64 edge_spacing            # m, 0 = node default (2 mm)
+float64 mesh_deflection         # m, 0 = node default (0.5 mm)
+---
+bool success
+string message
+string part_id
+uint32 n_solids
+uint32 n_faces
+uint32 n_edges
+float64 mass
+geometry_msgs/Vector3 bbox_min
+geometry_msgs/Vector3 bbox_max
+float64[] thicknesses           # distinct member thicknesses found, m

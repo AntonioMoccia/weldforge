@@ -1,0 +1,36 @@
+# Planner node parameters.
+#
+# These are the knobs an operator or a commissioning engineer changes. The
+# placement search effort is the main trade-off: the defaults take a few
+# seconds on a small part and a minute or two on a 200-seam weldment. Halve
+# the grid and yaw steps for a first look.
+/**/weldforge_planner:
+  ros__parameters:
+    cell: bench_cell
+    base_material: S355
+    frame_id: cell
+
+    # CAD import.
+    edge_spacing_mm: 2.0
+    mesh_deflection_mm: 0.5
+
+    # Seam recognition.
+    min_seam_length_mm: 5.0
+    min_confidence: 0.25
+
+    # Welding procedure. 0.7 is the usual structural default; 1.0 gives a
+    # full-strength fillet.
+    leg_thickness_ratio: 0.7
+
+    # Placement search.
+    placement_grid_steps: 5
+    placement_yaw_steps: 8
+    placement_orientations: 12
+
+    # Millimetres of air travel traded for heat balance when ordering seams.
+    # 0 optimises purely for cycle time; 600 for a thin part that will distort.
+    distortion_weight: 150.0
+
+    joint_names: [joint_1, joint_2, joint_3, joint_4, joint_5, joint_6]
+    publish_markers: true
+    marker_torch_length_mm: 40.0

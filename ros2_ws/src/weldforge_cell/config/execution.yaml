@@ -1,0 +1,18 @@
+# Weld job execution parameters.
+/**/weldforge_execution:
+  ros__parameters:
+    # The trajectory controller that owns the arm. This node never commands
+    # joints directly: the controller holds the limits and the safety.
+    controller_action: /joint_trajectory_controller/follow_joint_trajectory
+    welder_namespace: /weldforge_welder_io
+
+    trajectory_timeout_s: 300.0
+    arc_strike_timeout_s: 3.0
+
+    # Require the power source to confirm current flow before moving. Only set
+    # false on a machine with no arc-on feedback, and then accept that a
+    # failed strike will not be detected.
+    require_arc_feedback: true
+
+    # Speed factor applied when a goal asks for a dry run.
+    dry_run_speed_scale: 0.25

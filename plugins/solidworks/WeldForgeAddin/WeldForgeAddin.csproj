@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    SOLIDWORKS add-ins are in-process COM servers, so the target framework
+    must match what SOLIDWORKS loads: .NET Framework 4.8 for SOLIDWORKS 2021
+    and later. .NET (Core) is not an option for an in-process add-in.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>WeldForge.SwAddin</AssemblyName>
+    <RootNamespace>WeldForge</RootNamespace>
+    <LangVersion>9.0</LangVersion>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableComHosting>false</EnableComHosting>
+    <!-- regasm needs the type library. -->
+    <RegisterForComInterop>true</RegisterForComInterop>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Company>WeldForge</Company>
+    <Product>WeldForge SOLIDWORKS add-in</Product>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      SOLIDWORKS interop assemblies. Reference them from the installation
+      rather than from NuGet: the version must match the installed
+      SOLIDWORKS, and a mismatched interop fails at load with an unhelpful
+      message. Adjust the path for the installed year.
+    -->
+    <Reference Include="SolidWorks.Interop.sldworks">
+      <HintPath>C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\api\redist\SolidWorks.Interop.sldworks.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SolidWorks.Interop.swconst">
+      <HintPath>C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\api\redist\SolidWorks.Interop.swconst.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SolidWorks.Interop.swpublished">
+      <HintPath>C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\api\redist\SolidWorks.Interop.swpublished.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- System.Text.Json is not in the .NET Framework BCL. -->
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+</Project>

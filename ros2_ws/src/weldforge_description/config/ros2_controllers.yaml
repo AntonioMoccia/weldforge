@@ -1,0 +1,43 @@
+# ros2_control configuration for the welding arm.
+#
+# A single joint_trajectory_controller over all six axes. Welding is a
+# position-controlled task along a line: the travel speed is what the
+# procedure specifies, and the controller's job is to hold the programmed path
+# at that speed. Nothing here is torque- or impedance-controlled, and it
+# should not be -- a compliant torch wanders off the joint.
+controller_manager:
+  ros__parameters:
+    update_rate: 250  # Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    joint_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+joint_trajectory_controller:
+  ros__parameters:
+    joints:
+      - joint_1
+      - joint_2
+      - joint_3
+      - joint_4
+      - joint_5
+      - joint_6
+    command_interfaces: [position]
+    state_interfaces: [position, velocity]
+    # Tolerances sized for welding: 1 mm of path error shows in the bead, so
+    # the joint tolerances are tight and a violation stops the move rather
+    # than letting it finish out of position.
+    constraints:
+      stopped_velocity_tolerance: 0.01
+      goal_time: 0.5
+      joint_1: { trajectory: 0.05, goal: 0.01 }
+      joint_2: { trajectory: 0.05, goal: 0.01 }
+      joint_3: { trajectory: 0.05, goal: 0.01 }
+      joint_4: { trajectory: 0.08, goal: 0.02 }
+      joint_5: { trajectory: 0.08, goal: 0.02 }
+      joint_6: { trajectory: 0.10, goal: 0.02 }
+    allow_partial_joints_goal: false
+    open_loop_control: false
+    interpolation_method: splines

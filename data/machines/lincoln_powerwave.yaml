@@ -1,0 +1,69 @@
+# Lincoln Electric Power Wave with ArcLink to the robot.
+#
+# Weld modes are numbered in the hundreds and selected by number; trim replaces
+# the arc-length correction and runs 0.50-1.50 around nominal rather than
+# +/-10.
+name: Lincoln Power Wave R450
+vendor: Lincoln Electric
+interface: arclink
+description: >
+  Weld-mode number plus wire feed and trim. Trim is a multiplier about 1.00,
+  not a signed offset, so the mapping here converts the procedure's signed arc
+  correction into Lincoln's convention.
+
+job_selection:
+  mode: weld_mode
+  jobs:
+    - { wire_diameter_mm: 1.0, gas: M21-ArC-18, group: carbon_steel, mode: short_arc, job: 5 }
+    - { wire_diameter_mm: 1.2, gas: M21-ArC-18, group: carbon_steel, mode: short_arc, job: 10 }
+    - { wire_diameter_mm: 1.2, gas: M21-ArC-18, group: carbon_steel, mode: spray, job: 24 }
+    - { wire_diameter_mm: 1.2, gas: M21-ArC-18, group: carbon_steel, mode: pulse, job: 71 }
+    - { wire_diameter_mm: 1.6, gas: M21-ArC-18, group: carbon_steel, mode: spray, job: 27 }
+    - { wire_diameter_mm: 1.2, gas: M12-ArC-2, group: austenitic_stainless, mode: pulse, job: 81 }
+  fallback_job: 24
+  job_signal: WELD_MODE
+  job_raw_min: 0
+  job_raw_max: 999
+
+analog:
+  wire_speed:
+    signal: WFS
+    unit: m/min
+    value_min: 0.0
+    value_max: 25.0
+    raw_min: 0
+    raw_max: 65535
+  voltage:
+    signal: VOLTS
+    unit: V
+    value_min: 0.0
+    value_max: 50.0
+    raw_min: 0
+    raw_max: 65535
+
+corrections:
+  arc_length:
+    signal: TRIM
+    # Lincoln trim is a multiplier about unity: 1.00 nominal, 0.50-1.50 range.
+    value_min: -10.0
+    value_max: 10.0
+    raw_min: 500
+    raw_max: 1500
+    offset_raw: 1000
+  dynamic:
+    signal: WAVE_CONTROL
+    value_min: -10.0
+    value_max: 10.0
+    raw_min: -10
+    raw_max: 10
+
+digital:
+  arc_on: WELD_START
+  gas_test: GAS_PURGE
+  wire_inch: COLD_INCH_FWD
+  robot_ready: ROBOT_READY
+
+limits:
+  current_a: [40.0, 450.0]
+  voltage_v: [10.0, 44.0]
+  wire_speed_m_min: [1.0, 24.0]

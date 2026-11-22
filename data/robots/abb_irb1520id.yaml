@@ -1,0 +1,22 @@
+# ABB IRB 1520ID: purpose-built for arc welding, with the dress pack routed
+# inside the upper arm. The integrated dress pack is why it is worth modelling
+# separately -- it changes nothing kinematically but removes the cable loop
+# that otherwise dominates collision checking around the torch.
+name: ABB IRB 1520ID
+vendor: ABB
+reach_mm: 1500
+payload_kg: 4.0
+wrist: spherical
+notes:
+  - "Nominal geometry. Confirm axis signs and zero offsets against the real controller."
+  - "Integrated dress pack: no external cable loop to model around the torch."
+
+joints:
+  - { name: J1, alpha: 0.0,   a: 0.0,   d: 453.0, limit_deg: [-170, 170], max_speed_deg_s: 170 }
+  - { name: J2, alpha: -90.0, a: 160.0, d: 0.0,   limit_deg: [-90, 150],  max_speed_deg_s: 170 }
+  - { name: J3, alpha: 0.0,   a: 590.0, d: 0.0,   limit_deg: [-100, 80],  max_speed_deg_s: 170 }
+  - { name: J4, alpha: -90.0, a: 0.0,   d: 647.0, limit_deg: [-155, 155], max_speed_deg_s: 320 }
+  - { name: J5, alpha: 90.0,  a: 0.0,   d: 0.0,   limit_deg: [-135, 135], max_speed_deg_s: 380 }
+  - { name: J6, alpha: -90.0, a: 0.0,   d: 200.0, limit_deg: [-200, 200], max_speed_deg_s: 460 }
+
+home_deg: [0, -45, 45, 0, 90, 0]

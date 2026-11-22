@@ -1,0 +1,8 @@
+# Push setpoints to the power source without welding -- used for setting up
+# and for proving the fieldbus mapping before a part is in the fixture.
+weldforge_msgs/MachineSetpoints setpoints
+bool gas_test                   # purge gas for the configured time
+bool wire_inch                  # feed wire cold
+---
+bool success
+string message

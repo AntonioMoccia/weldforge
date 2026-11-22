@@ -1,0 +1,26 @@
+# KUKA KR 16-2: the general-purpose arc-welding workhorse.
+#
+# Link lengths are the published nominal geometry. The zero-position mapping
+# (`theta_offset` and `sign` per joint) is the part that MUST be confirmed
+# against the robot in the cell before generated programs are run: vendors
+# measure some axes in the opposite sense to the DH chain, and an uncalibrated
+# sign flip puts the torch in the wrong place with no warning.
+name: KUKA KR 16-2
+vendor: KUKA
+reach_mm: 1611
+payload_kg: 16.0
+wrist: spherical
+notes:
+  - "Nominal geometry. Confirm axis signs and zero offsets against the real controller."
+  - "Flange to torch tip must be measured on the cell; `tool` here is a placeholder."
+
+# Modified DH (Craig). alpha and a belong to the PRECEDING link.
+joints:
+  - { name: A1, alpha: 0.0,   a: 0.0,   d: 675.0, limit_deg: [-185, 185], max_speed_deg_s: 156 }
+  - { name: A2, alpha: -90.0, a: 260.0, d: 0.0,   limit_deg: [-155, 35],  max_speed_deg_s: 156 }
+  - { name: A3, alpha: 0.0,   a: 680.0, d: 0.0,   limit_deg: [-130, 154], max_speed_deg_s: 156 }
+  - { name: A4, alpha: -90.0, a: -35.0, d: 670.0, limit_deg: [-350, 350], max_speed_deg_s: 330 }
+  - { name: A5, alpha: 90.0,  a: 0.0,   d: 0.0,   limit_deg: [-130, 130], max_speed_deg_s: 330 }
+  - { name: A6, alpha: -90.0, a: 0.0,   d: 158.0, limit_deg: [-350, 350], max_speed_deg_s: 615 }
+
+home_deg: [0, -90, 90, 0, 60, 0]

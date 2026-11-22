@@ -1,0 +1,28 @@
+# Execute a planned weld job.
+#
+# The action server owns the arc: it moves the robot, strikes and extinguishes
+# the arc at the right stations, and watches the power source's feedback. If
+# the arc fails to establish or drops out mid-bead it aborts and retracts --
+# which is why execution is an action and not a service.
+weldforge_msgs/WeldPlan plan
+bool dry_run                    # move at reduced speed with the arc inhibited
+float64 speed_scale             # 0..1, applied to every trajectory
+bool stop_on_arc_fault
+---
+bool success
+string message
+uint32 passes_completed
+uint32 passes_total
+float64 arc_time                # s actually burning
+float64 wire_used               # kg, from wire speed times arc time
+string[] faults
+---
+string stage                    # moving | striking | welding | retracting | idle
+string seam_id
+uint16 pass_index
+uint32 passes_completed
+uint32 passes_total
+float64 progress                # 0..1 over the whole job
+float64 current                 # measured, A
+float64 voltage                 # measured, V
+bool arc_established

@@ -1,0 +1,24 @@
+# Pilz industrial motion planner: PTP, LIN and CIRC.
+#
+# This is the planner that matters for welding. A weld bead must follow the
+# seam exactly at a controlled speed, which is what LIN and CIRC give: an
+# exact Cartesian line or arc, timed to a commanded velocity. A sampling
+# planner cannot promise either.
+#
+# WeldForge already produces the Cartesian path and its joint solutions, so
+# Pilz is used where MoveIt is asked to re-plan a welding move -- for instance
+# after an operator nudges a seam in RViz.
+planning_plugins:
+  - pilz_industrial_motion_planner/CommandPlanner
+
+default_planner_config: LIN
+
+capabilities: >-
+  pilz_industrial_motion_planner/MoveGroupSequenceAction
+  pilz_industrial_motion_planner/MoveGroupSequenceService
+
+request_adapters:
+  - default_planning_request_adapters/ResolveConstraintFrames
+  - default_planning_request_adapters/ValidateWorkspaceBounds
+  - default_planning_request_adapters/CheckStartStateBounds
+  - default_planning_request_adapters/CheckStartStateCollision

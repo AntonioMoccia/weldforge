@@ -1,0 +1,48 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ROS 2 / colcon
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# macOS
+.DS_Store
+
+# Customer geometry and anything generated from it never belongs in the
+# repository: a STEP file of a customer's weldment is their drawing, and a
+# generated preview carries the same geometry inside it.
+*.stp
+*.step
+*.igs
+*.iges
+*.sldprt
+*.sldasm
+*.x_t
+*.x_b
+*_preview.html
+
+# Working directory: CAD goes in, robot programs come out. Both are job data.
+work/*
+!work/.gitkeep
+
+# Saved jobs
+*.weldforge
+*.weldforge.part
+
+# Generated programs
+out/

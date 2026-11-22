@@ -1,0 +1,124 @@
+# GMAW / MAG synergic data for carbon and low-alloy steel.
+#
+# Solid wire to EN ISO 14341 (G3Si1 / G4Si1) in M21 shielding gas
+# (Ar + 18% CO2) per EN ISO 14175. Numbers are the working ranges published by
+# consumable makers for these wire sizes, which is what a welding engineer
+# would start a WPS from before qualifying it.
+#
+# Units: current A, voltage V, wire feed m/min, lengths mm, speeds mm/s.
+#
+# `curve` entries are (current, voltage, wire_feed) triples. The engine
+# interpolates between them, so three or four well-spaced points per wire
+# diameter is enough -- a synergic line is close to linear over its useful
+# range and pretending otherwise invites false precision.
+
+process: GMAW
+base_material_group: carbon_steel      # ISO/TR 15608 groups 1 and 2
+filler: G3Si1
+gas: M21-ArC-18
+gas_flow_l_min: 15.0
+deposition_efficiency: 0.95            # solid wire, low spatter
+thermal_efficiency: 0.80               # EN 1011-1 for GMAW
+
+wires:
+  - diameter_mm: 0.8
+    min_current_a: 50.0
+    max_current_a: 150.0
+    modes: [short_arc]
+    curve:
+      - [60.0, 15.5, 2.5]
+      - [100.0, 18.0, 5.0]
+      - [150.0, 20.5, 9.0]
+
+  - diameter_mm: 1.0
+    min_current_a: 70.0
+    max_current_a: 300.0
+    modes: [short_arc, spray, pulse]
+    curve:
+      - [90.0, 17.0, 3.2]
+      - [150.0, 20.0, 6.5]
+      - [220.0, 26.0, 11.0]
+      - [300.0, 31.0, 16.5]
+
+  - diameter_mm: 1.2
+    min_current_a: 100.0
+    max_current_a: 350.0
+    modes: [short_arc, spray, pulse, double_pulse]
+    curve:
+      - [120.0, 17.5, 2.8]
+      - [180.0, 21.5, 5.2]
+      - [240.0, 27.0, 8.4]
+      - [320.0, 32.0, 13.5]
+
+  - diameter_mm: 1.6
+    min_current_a: 200.0
+    max_current_a: 500.0
+    modes: [spray, pulse]
+    curve:
+      - [250.0, 27.0, 4.2]
+      - [350.0, 32.0, 7.0]
+      - [450.0, 36.0, 10.5]
+
+# Transfer mode by current density and position. Short arc is the only choice
+# in vertical-up and overhead below spray transition; spray is faster but its
+# fluid pool will not hold out of position.
+mode_selection:
+  short_arc_max_current_a: 180.0       # above this, spray transition in M21
+  out_of_position_modes: [short_arc, pulse]
+
+# Target travel speed by position, mm/s. Travel speed is *not* taken from here
+# directly: it is computed from the deposited cross-section and the wire feed,
+# and these values set the wire feed that lands near them. Out of position the
+# pool must be kept small, so the figures drop.
+target_travel_speed_mm_s:
+  PA: 8.0
+  PB: 7.0
+  PC: 5.5
+  PD: 4.0
+  PE: 4.0
+  PF: 3.5
+  PG: 6.0
+
+travel_speed_limits_mm_s: [2.0, 20.0]
+
+# Largest fillet leg one pass can carry, mm. Flat positions hold a bigger
+# bead; vertical-up and overhead do not, which is what drives multi-pass.
+max_leg_per_pass_mm:
+  PA: 8.0
+  PB: 7.0
+  PC: 6.0
+  PD: 5.0
+  PE: 5.0
+  PF: 5.0
+  PG: 6.0
+
+# Torch angles, degrees. Work angle is measured from the lower member towards
+# the upright one; 45 deg is the symmetric fillet. Travel angle is negative for
+# push (forehand), which gives a flatter bead and better gas coverage on thin
+# material.
+torch_angles:
+  fillet:   { work: 45.0, travel: -10.0 }
+  tee:      { work: 45.0, travel: -10.0 }
+  lap:      { work: 60.0, travel: -10.0 }   # bias towards the thicker plate
+  butt:     { work: 90.0, travel: -5.0 }
+  corner:   { work: 45.0, travel: -10.0 }
+  edge:     { work: 90.0, travel: 0.0 }
+  plug:     { work: 90.0, travel: 0.0 }
+  unknown:  { work: 45.0, travel: -10.0 }
+
+# Vertical-up and overhead need weaving for sidewall fusion; flat does not.
+weave:
+  PF: { shape: triangular, amplitude_mm: 4.0, frequency_hz: 1.2, dwell_ms: 150.0 }
+  PD: { shape: zigzag, amplitude_mm: 2.5, frequency_hz: 1.8, dwell_ms: 80.0 }
+  PE: { shape: zigzag, amplitude_mm: 2.5, frequency_hz: 1.8, dwell_ms: 80.0 }
+
+stickout_mm:
+  short_arc: 12.0
+  spray: 18.0
+  pulse: 16.0
+  double_pulse: 16.0
+
+# Root gap compensation: a wider gap needs more filler and a slower travel.
+gap_compensation:
+  per_mm_travel_factor: -0.12          # -12% travel speed per mm of gap
+  max_gap_mm: 4.0

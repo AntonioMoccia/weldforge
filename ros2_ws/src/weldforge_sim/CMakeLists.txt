@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.16)
+project(weldforge_sim)
+find_package(ament_cmake REQUIRED)
+install(DIRECTORY worlds launch config DESTINATION share/${PROJECT_NAME})
+ament_package()

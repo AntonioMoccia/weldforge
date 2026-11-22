@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
+  <name>WeldForge</name>
+  <description>
+    From a weldment model to a robot program: recognise the weld seams,
+    generate a welding procedure for each, choose where the part goes in the
+    cell, plan the torch paths and export a controller program.
+  </description>
+  <version>0.1.0</version>
+  <maintainer email="moccia.ant@gmail.com">Antonio Moccia</maintainer>
+  <license file="LICENSE">Proprietary</license>
+  <content>
+    <workbench>
+      <classname>WeldForgeWorkbench</classname>
+      <subdirectory>./</subdirectory>
+      <icon>icons/weldforge.svg</icon>
+      <name>WeldForge</name>
+      <description>Robotic welding preparation</description>
+    </workbench>
+  </content>
+  <freecadmin>0.21</freecadmin>
+</package>

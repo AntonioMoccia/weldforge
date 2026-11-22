@@ -250,6 +250,9 @@ class Scene3D:
         self._face_by_cell: list[str] = []
         self._part_transform = tf.identity()
         self._part_actors: list[Any] = []
+        #: The robot the scene was built with. Animating the arm needs forward
+        #: kinematics, so the model has to be kept, not re-derived.
+        self._robot: Any | None = None
         self._robot_actor: Any | None = None
         self._torch_actor: Any | None = None
         self._frames: list[dict[str, Any]] = []
@@ -278,6 +281,7 @@ class Scene3D:
         self._edge_by_cell.clear()
         self._face_by_cell.clear()
         self._part_actors.clear()
+        self._robot = None
         self._robot_actor = None
         self._torch_actor = None
         self._frames.clear()
@@ -305,6 +309,7 @@ class Scene3D:
         if project.part is not None:
             self._build_part(project.part, project.placement)
         self._build_seams(project)
+        self._robot = robot
         if robot is not None:
             self._build_robot(robot)
         self._build_path(project)
@@ -487,7 +492,7 @@ class Scene3D:
         # Animation frames: the arm polyline and the wire, per station.
         from ..kin import fk_all
 
-        robot = getattr(project, "_robot", None)
+        robot = self._robot
         if robot is None:
             return
         for path in job.paths:

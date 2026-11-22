@@ -381,7 +381,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_prompt.setText(self.tool.prompt())
 
     def _rebuild_scene(self) -> None:
-        self.project._robot = self.robot  # used by the scene for animation
         self.scene.set_project(self.project, self.robot)
         self.scene.reset_camera("iso")
         self.simulation_panel.set_frames(self.scene.frame_count)

@@ -221,6 +221,72 @@ def test_the_panel_signals_the_window_connects_all_exist(tmp_path: Path):
     assert "every panel signal is connected" in output
 
 
+def test_the_window_only_calls_things_that_exist(tmp_path: Path):
+    """The window cannot be built offscreen, so check its contract instead.
+
+    ``MainWindow`` is the one module in the application no test can construct,
+    which makes a typo in it exactly the kind of mistake that surfaces in front
+    of an operator. Reading the source and checking every attribute it reaches
+    for against the real classes is weaker than running it, but it catches the
+    renames -- and it caught the window stashing the robot model on a private
+    attribute of the project that nothing was meant to read.
+    """
+    output = _run(
+        r"""
+        import dataclasses
+        import inspect
+        import re
+
+        from weldforge.app import main_window
+        from weldforge.app.project import Project
+        from weldforge.app.scene3d import Scene3D
+        from weldforge.app.tools import (
+            PlacePartTool, SelectTool, Tool, ToolResult, TraceSeamTool,
+        )
+
+        source = inspect.getsource(main_window)
+
+        def used(attribute):
+            return set(re.findall(rf"self\.{attribute}\.(\w+)", source))
+
+        def members(cls):
+            # A dataclass field with a default_factory is not a class
+            # attribute, so hasattr alone would call every one of them missing.
+            names = set(dir(cls))
+            if dataclasses.is_dataclass(cls):
+                names |= {f.name for f in dataclasses.fields(cls)}
+            return names
+
+        missing = []
+        for member in used("scene") - members(Scene3D):
+            missing.append(f"Scene3D.{member}")
+        for member in used("project") - members(Project):
+            missing.append(f"Project.{member}")
+        # The active tool is any of the three, so a member has to be on the
+        # base class or on a concrete tool the window can install.
+        tools = (Tool, SelectTool, TraceSeamTool, PlacePartTool)
+        for member in used("tool"):
+            if not any(member in members(cls) for cls in tools):
+                missing.append(f"Tool.{member}")
+        assert not missing, f"MainWindow reaches for things that do not exist: {missing}"
+        print("the window's contract holds")
+
+        # And where it handles a tool result, the fields it branches on are
+        # the ones ToolResult really has. Scoped to that one method, because
+        # "result" elsewhere in the window is a postprocessor's or a
+        # dispatch's result, with fields of its own.
+        handler = inspect.getsource(main_window.MainWindow._handle_tool_result)
+        fields = {f.name for f in dataclasses.fields(ToolResult)} | set(dir(ToolResult))
+        unknown = set(re.findall(r"\bresult\.(\w+)", handler)) - fields
+        assert not unknown, f"ToolResult has no {unknown}"
+        print("tool results checked")
+        """,
+        tmp_path,
+    )
+    assert "the window's contract holds" in output
+    assert "tool results checked" in output
+
+
 def test_the_application_module_exposes_an_entry_point(tmp_path: Path):
     """``weldforge-studio`` has to resolve to something callable."""
     output = _run(

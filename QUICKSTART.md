@@ -179,6 +179,22 @@ posizionatore.
 
 ---
 
+## Il pezzo vero nei test
+
+Alcuni test girano su un pezzo di produzione invece che sui campioni
+sintetici. Il file non sta nel repository — un disegno non si pubblica — e
+quei test vengono saltati se non lo trovi. Per farli girare:
+
+```bash
+export WELDFORGE_TEST_PART="../Giunto  ver 2.0.stp"
+pytest -q
+```
+
+Senza la variabile viene cercato un `.stp` o `.step` nella cartella sopra al
+repository, che è dove il file sta adesso.
+
+---
+
 ## Verificare che tutto funzioni
 
 ```bash

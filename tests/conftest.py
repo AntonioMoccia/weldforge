@@ -11,6 +11,7 @@ can be tested against geometry whose right answer is known by construction.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -230,19 +231,25 @@ def stl_tee(specimen_dir: Path, tee_assembly_step: Path) -> Path:
 
 @pytest.fixture(scope="session")
 def company_step() -> Path | None:
-    """The real customer part, if it happens to be present.
+    """A real production weldment, if one happens to be present.
 
-    Tests that use it are skipped when it is not -- they are a bonus signal,
-    never a requirement.
+    Point ``WELDFORGE_TEST_PART`` at a STEP file to run the tests that need a
+    real part. Tests that use it are skipped when it is absent -- they are a
+    bonus signal, never a requirement, because the repository must not depend
+    on a part that cannot be published with it.
     """
-    candidates = [
-        Path("/Users/antoniomoccia/Desktop/robotica/Giunto  ver 2.0.stp"),
-        Path(__file__).resolve().parents[2] / "Giunto  ver 2.0.stp",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
-    return None
+    from_environment = os.environ.get("WELDFORGE_TEST_PART")
+    if from_environment:
+        candidate = Path(from_environment).expanduser()
+        return candidate if candidate.exists() else None
+
+    # Otherwise the folder above the repository, which is where the file sits
+    # during development.
+    parent = Path(__file__).resolve().parents[2]
+    return next(
+        (f for pattern in ("*.stp", "*.step") for f in sorted(parent.glob(pattern))),
+        None,
+    )
 
 
 # ---------------------------------------------------------------------------

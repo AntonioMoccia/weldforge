@@ -716,6 +716,12 @@ class Fixture:
     # Datum features the part must register against, as (point, normal) pairs.
     datums: list[tuple[np.ndarray, np.ndarray]] = field(default_factory=list)
     load_capacity_kg: float = 500.0
+    #: Filename of a 3-D model imported as the bench, empty when the bench is
+    #: just the box above. The mesh itself is an obstacle in ``obstacles`` so
+    #: that collision checking and the 3-D view pick it up with no special
+    #: case; this field is what lets the view draw the model instead of the
+    #: box, and what names the file to re-embed when a project is saved.
+    model_source: str = ""
 
     def __post_init__(self) -> None:
         self.table_origin = np.asarray(self.table_origin, dtype=float).reshape(3)

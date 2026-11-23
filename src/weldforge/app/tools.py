@@ -25,6 +25,7 @@ import numpy as np
 
 from ..geom import polyline as pl
 from ..geom import transform as tf
+from ..i18n import t
 from ..model import JointType, Seam
 from ..seams.classify import ContactKind, JointContext, classify
 from ..seams.dihedral import (
@@ -43,6 +44,8 @@ __all__ = [
     "Tool",
     "SelectTool",
     "TraceSeamTool",
+    "TwoFaceTool",
+    "MoveCellTool",
     "PlacePartTool",
     "ToolError",
 ]
@@ -98,6 +101,56 @@ class Tool:
     def cancel(self) -> ToolResult:
         return ToolResult.info("cancelled", finished=True)
 
+    # -- dragging -----------------------------------------------------------
+    #
+    # A tool that moves things needs the mouse between press and release, not
+    # just the click. The window asks ``dragging()`` after every pick and,
+    # while it is true, feeds ``on_drag`` a point in the world -- already
+    # projected onto the plane the drag runs in, so no tool knows about
+    # cameras. Still no Qt and no VTK here.
+
+    def dragging(self) -> bool:
+        """True while this tool is holding something and wants mouse moves."""
+        return False
+
+    def drag_plane_z(self) -> float | None:
+        """Height of the plane the drag runs in, or ``None`` when not dragging."""
+        return None
+
+    def on_drag(self, point: np.ndarray) -> ToolResult:
+        return ToolResult.info("")
+
+    def on_drop(self) -> ToolResult:
+        return ToolResult.info("")
+
+    def drag_preview(self) -> tuple[str, np.ndarray] | None:
+        """``(scene key, offset)`` to shift while dragging, before committing.
+
+        Moving the actor is what makes a drag feel like a drag; rebuilding the
+        whole cell on every mouse move would not. The model is written on
+        release, in one step the operator can undo as one step.
+        """
+        return None
+
+    def drag_through(self) -> np.ndarray | None:
+        """The grab point, for a drag plane that faces the camera.
+
+        The horizontal plane is correct but, seen at a shallow angle, turns a
+        nudge into metres. When this is given the window projects the cursor
+        onto the view-facing plane through it instead.
+        """
+        return None
+
+    def busy(self) -> bool:
+        """True while mid-action, when Enter and Esc mean something.
+
+        Lets the window route those keys here from wherever the focus is: an
+        operator who typed a bench height and then traced a line presses
+        Enter with the focus still in the spin box, and the line must still
+        be accepted.
+        """
+        return False
+
 
 # ---------------------------------------------------------------------------
 # selection
@@ -116,7 +169,7 @@ class SelectTool(Tool):
         self.selected_id: str = ""
 
     def prompt(self) -> str:
-        return "Click a weld seam to select it."
+        return t("Click a weld seam to select it.")
 
     def on_pick(self, pick: PickResult) -> ToolResult:
         if pick.kind != "seam":
@@ -206,21 +259,28 @@ class TraceSeamTool(Tool):
         super().__init__(project)
         self.state = _TraceState()
         self.joint_type = joint_type
-        self.chain_tolerance_mm = 1.0
+        # Two real edges on a filleted part are separated by the blend
+        # between them, a few millimetres that are not pickable (see
+        # MIN_PICK_EDGE_MM). At 1 mm they never "met" and the line could not
+        # be continued; 5 mm bridges a blend and is still far below any gap
+        # that could be mistaken for a different seam.
+        self.chain_tolerance_mm = 5.0
 
     # -- prompting ----------------------------------------------------------
 
     def prompt(self) -> str:
         if not self.state.edge_ids:
-            return "Click an edge of the joint. Esc cancels."
+            return t("Click an edge of the joint. Esc cancels.")
         if not self.state.flank_face_id:
-            return (
-                f"{len(self.state.edge_ids)} edge(s). Click the next edge, or the "
-                "face the joint beds against, then Enter to accept."
+            return t(
+                "{count} edge(s). Click the next edge, or the face the joint beds "
+                "against, then Enter to accept.",
+                count=len(self.state.edge_ids),
             )
-        return (
-            f"{len(self.state.edge_ids)} edge(s) against a face. "
-            "Enter accepts, Backspace undoes the last pick."
+        return t(
+            "{count} edge(s) against a face. Enter accepts, Backspace undoes the "
+            "last pick.",
+            count=len(self.state.edge_ids),
         )
 
     def preview(self) -> np.ndarray | None:
@@ -235,10 +295,19 @@ class TraceSeamTool(Tool):
             return self._set_flank(pick.id)
         return ToolResult.info("")
 
+    def busy(self) -> bool:
+        return bool(self.state.edge_ids)
+
     def _add_edge(self, edge_id: str) -> ToolResult:
         part = self.project.part
         if part is None or edge_id not in part.edges:
             return ToolResult.error("that edge is not part of the loaded model")
+        if self.state.edge_ids and edge_id == self.state.edge_ids[-1]:
+            # Clicking the edge you just picked again is how people say "done"
+            # -- the log showed it thirteen times in one session, each one
+            # answered with a refusal. Treat it as accepting the line; a seam
+            # accepted by mistake is one click to delete.
+            return self.commit()
         if edge_id in self.state.edge_ids:
             return ToolResult.error("that edge is already in the line")
 
@@ -486,6 +555,398 @@ class TraceSeamTool(Tool):
 
 
 # ---------------------------------------------------------------------------
+# tracing a weld from the two faces that form the joint
+# ---------------------------------------------------------------------------
+
+
+class TwoFaceTool(Tool):
+    """Click the two surfaces to be joined; the seam and its angle follow.
+
+    This is how a welder describes a joint -- "this plate onto that one" --
+    and how the better offline-programming tools let you point at it. The
+    operator says *what* is welded; where the seam runs, how wide the groove
+    is and which way the torch points are derived, not clicked:
+
+    * two faces of the **same body** meet along an edge: that edge is the
+      seam, and the groove is the angle between the faces there;
+    * two faces of **different bodies** touch (an assembly): the contact
+      detector already knows where, so the seam comes from that contact,
+      with the measured gap carried into it for the procedure;
+    * faces that do not meet are refused with a reason, not guessed at.
+
+    Edge-by-edge tracing stays available for the odd case. It is no longer
+    the front door, because on a real part the front door was a hundred
+    fillet blends an operator had to pick around.
+    """
+
+    name = "twofaces"
+    title = "Trace weld from two faces"
+    pick_layers = ("part",)
+
+    def __init__(self, project: Project, joint_type: JointType | None = None) -> None:
+        super().__init__(project)
+        self.face_a: str = ""
+        self.face_b: str = ""
+        self.joint_type = joint_type
+        self._seam: Seam | None = None
+
+    # -- prompting ----------------------------------------------------------
+
+    def prompt(self) -> str:
+        if not self.face_a:
+            return t("Click the first surface of the joint.")
+        if self._seam is None:
+            return t("Click the surface it is welded to. Esc starts over.")
+        return t("Accept with Enter, a click on the seam, or pick two new surfaces.")
+
+    def busy(self) -> bool:
+        return bool(self.face_a)
+
+    def preview(self) -> np.ndarray | None:
+        return self._seam.points if self._seam is not None else None
+
+    # -- picking ------------------------------------------------------------
+
+    def on_pick(self, pick: PickResult) -> ToolResult:
+        if pick.kind == "seam" and self._seam is not None:
+            return self.commit()
+        if pick.kind != "face":
+            return ToolResult.info("")
+        part = self.project.part
+        if part is None or pick.id not in part.faces:
+            return ToolResult.error(t("that surface is not part of the loaded model"))
+
+        if self._seam is not None or not self.face_a:
+            # Starting a new joint: either the first click, or a new pair after
+            # a seam was computed but not accepted.
+            self.face_a, self.face_b, self._seam = pick.id, "", None
+            return ToolResult.info(t("first surface: {face}", face=pick.id), changed=False)
+        if pick.id == self.face_a:
+            return ToolResult.error(t("that is the same surface; pick the one it is welded to"))
+
+        self.face_b = pick.id
+        try:
+            self._seam = self._derive()
+        except ToolError as exc:
+            self.face_b = ""
+            return ToolResult.error(str(exc))
+        groove = float(np.rad2deg(self._seam.mean_dihedral))
+        gap = f", gap {self._seam.gap_mm:.1f} mm" if self._seam.gap_mm > 0.05 else ""
+        return ToolResult.info(
+            t(
+                "{joint}: {length:.0f} mm, groove {groove:.0f} deg{gap}. Enter to accept.",
+                joint=self._seam.joint_type.value,
+                length=self._seam.length_mm,
+                groove=groove,
+                gap=gap,
+            ),
+            changed=False,
+        )
+
+    def on_command(self, command: str) -> ToolResult:
+        if command == "accept":
+            return self.commit()
+        if command in ("cancel", "undo"):
+            had = bool(self.face_a)
+            self.face_a, self.face_b, self._seam = "", "", None
+            return ToolResult.info(t("tracing cancelled") if had else "", finished=had)
+        return ToolResult.info("")
+
+    def commit(self) -> ToolResult:
+        if self._seam is None:
+            return ToolResult.error(t("pick the two surfaces of the joint first"))
+        seam = self._seam
+        self.project.add_manual_seam(seam)
+        self.face_a, self.face_b, self._seam = "", "", None
+        return ToolResult.info(
+            t(
+                "weld added: {joint}, {length:.0f} mm, groove {groove:.0f} deg",
+                joint=seam.joint_type.value,
+                length=seam.length_mm,
+                groove=float(np.rad2deg(seam.mean_dihedral)),
+            ),
+            changed=True,
+            seam_id=seam.id,
+            finished=True,
+        )
+
+    # -- deriving the seam ---------------------------------------------------
+
+    def _derive(self) -> Seam:
+        part = self.project.part
+        if part is None or not part.brep.available:
+            raise ToolError(
+                t("this needs the exact geometry, which this part does not carry (mesh import)")
+            )
+        a, b = part.faces[self.face_a], part.faces[self.face_b]
+        if a.solid_id == b.solid_id:
+            return self._from_shared_edge()
+        return self._from_contact()
+
+    def _from_shared_edge(self) -> Seam:
+        """Same body: the seam is the edge the two faces share."""
+        part = self.project.part
+        topo = part.brep.topology
+        keys = {v: k for k, v in topo.face_ids.items()}
+        ka, kb = keys.get(self.face_a), keys.get(self.face_b)
+        shared = [
+            topo.edge_ids[ek]
+            for ek, faces in topo.edge_faces.items()
+            if ka in faces
+            and kb in faces
+            and ek in topo.edge_ids
+            and topo.edge_ids[ek] in part.edges
+        ]
+        if not shared:
+            raise ToolError(
+                t("these two surfaces do not meet along an edge on this body")
+            )
+        # Reuse the edge tracer's geometry: it already knows how to chain
+        # the shared edges and measure the groove at them.
+        tracer = TraceSeamTool(self.project, self.joint_type)
+        tracer.chain_tolerance_mm = 5.0
+        for edge_id in shared:
+            result = tracer._add_edge(edge_id)
+            if not result.ok and edge_id not in tracer.state.edge_ids:
+                # An edge that does not continue the chain belongs to a second
+                # run of the same joint (a face wrapping round a hole, say);
+                # the first run is the seam the operator pointed at.
+                break
+        return tracer._build_seam()
+
+    def _from_contact(self) -> Seam:
+        """Different bodies: the seam is where these two faces touch."""
+        from ..seams import detect_contact_seams
+
+        part = self.project.part
+        picked = {self.face_a, self.face_b}
+        # The welder clicks the two surfaces that form the angle -- the
+        # receiving plate and the flank rising from it. Those are exactly the
+        # faces a contact seam records as its flanks, so the match is made on
+        # the seams the detector would produce, not on the hidden landing face
+        # underneath the body.
+        candidates = detect_contact_seams(part)
+        exact = [s for s in candidates if {s.face_a_id, s.face_b_id} == picked]
+        if not exact:
+            # Relaxed: one flank is the picked face, the other picked face is on
+            # the other body -- the operator clicked the landing face itself.
+            solids = {part.faces[f].solid_id for f in picked}
+            exact = [
+                s
+                for s in candidates
+                if {s.face_a_id, s.face_b_id} & picked
+                and {s.solid_a_id, s.solid_b_id} == solids
+            ]
+        if not exact:
+            raise ToolError(
+                t(
+                    "these two surfaces do not touch (or the gap is wider than the "
+                    "contact tolerance). Bring the bodies together in the CAD, or "
+                    "trace along edges."
+                )
+            )
+        seam = max(exact, key=lambda s: s.length_mm)
+        if self.joint_type is not None:
+            seam.joint_type = self.joint_type
+        seam.confidence = 1.0
+        seam.label = (
+            f"manual - {seam.joint_type.value} {seam.length_mm:.0f} mm "
+            f"({seam.dominant_position.value})"
+        )
+        return seam
+
+
+# ---------------------------------------------------------------------------
+# moving the cell around
+# ---------------------------------------------------------------------------
+
+
+class MoveCellTool(Tool):
+    """Drag the bench, a clamp or an obstacle to where it really is.
+
+    Why dragging as well as the numbers. Both are how a cell gets described,
+    and they are good at different things. Typing 1250 mm is how an operator
+    records a tape measurement; dragging is how they find out that the bench
+    is too close to the robot column, which is a judgement made by looking.
+    The panel and the viewport edit the same cell description, so a drag moves
+    the numbers and a typed number moves the model.
+
+    Everything moves in the horizontal plane it was grabbed at. A bench that
+    can be dragged into the floor, or a clamp that comes off its table, is a
+    cell that no longer describes anything -- and height is exactly the
+    quantity an operator has measured and wants left alone. Z stays in the
+    panel, where it is a number.
+    """
+
+    name = "move"
+    title = "Move cell elements"
+    pick_layers = ("cell", "clamps")
+
+    #: Grab targets, as the scene labels them.
+    BENCH_KEYS = ("table", "bench:bench_model")
+
+    def __init__(self, project: Project) -> None:
+        super().__init__(project)
+        self.target: str = ""
+        self.label: str = ""
+        self._grab = np.zeros(3)
+        self._offset = np.zeros(3)
+        self._plane_z: float | None = None
+
+    # -- prompting ----------------------------------------------------------
+
+    def prompt(self) -> str:
+        if not self.target:
+            return t("Drag the bench, a clamp or an obstacle. Esc leaves it alone.")
+        return t("moving {what}: release to drop it, Esc to put it back", what=self.label)
+
+    # -- grabbing -----------------------------------------------------------
+
+    def on_pick(self, pick: PickResult) -> ToolResult:
+        if pick.kind != "cell" or not pick.id:
+            self.target = ""
+            return ToolResult.info("")
+
+        label = self._describe(pick.id)
+        if label is None:
+            return ToolResult.error(
+                t(
+                    "{key} is not something that can be moved. Drag the bench, "
+                    "a clamp or an obstacle.",
+                    key=pick.id,
+                )
+            )
+        self.target = pick.id
+        self.label = label
+        self._grab = np.asarray(pick.point, dtype=float).copy()
+        self._offset = np.zeros(3)
+        self._plane_z = float(self._grab[2])
+        return ToolResult.info(t("holding {what}", what=label), changed=False)
+
+    def _describe(self, key: str) -> str | None:
+        """A name for what was grabbed, or ``None`` when it cannot be moved."""
+        if key in self.BENCH_KEYS:
+            return t("the bench")
+        kind, _, identifier = key.partition(":")
+        if kind == "clamp":
+            clamp = self._clamp(identifier)
+            return t("clamp {name}", name=clamp.get("name") or identifier) if clamp else None
+        if self._obstacle(identifier) is not None:
+            obstacle = self._obstacle(identifier) or {}
+            return f"{obstacle.get('name') or identifier}"
+        return None
+
+    # -- dragging -----------------------------------------------------------
+
+    def dragging(self) -> bool:
+        return bool(self.target)
+
+    def busy(self) -> bool:
+        return bool(self.target)
+
+    def drag_through(self) -> np.ndarray | None:
+        return self._grab.copy() if self.target else None
+
+    def drag_plane_z(self) -> float | None:
+        return self._plane_z
+
+    def on_drag(self, point: np.ndarray) -> ToolResult:
+        if not self.target:
+            return ToolResult.info("")
+        offset = np.asarray(point, dtype=float) - self._grab
+        offset[2] = 0.0  # the drag plane is horizontal; height stays a number
+        self._offset = offset
+        return ToolResult.info(
+            t("{what}: {dx:+.0f}, {dy:+.0f} mm", what=self.label, dx=offset[0], dy=offset[1]),
+            changed=False,
+        )
+
+    def drag_preview(self) -> tuple[str, np.ndarray] | None:
+        if not self.target:
+            return None
+        return self.target, self._offset.copy()
+
+    def on_drop(self) -> ToolResult:
+        """Write the move into the cell description."""
+        if not self.target:
+            return ToolResult.info("")
+        offset = self._offset.copy()
+        label = self.label
+        moved = self._apply(self.target, offset)
+        self.target = ""
+        self._offset = np.zeros(3)
+        self._plane_z = None
+        if not moved:
+            return ToolResult.info("")
+        if float(np.linalg.norm(offset[:2])) < 0.5:
+            # A click that did not really move anything is a click, not an
+            # edit: reporting a change would dirty the project for nothing.
+            return ToolResult.info(t("{what} left where it was", what=label))
+        return ToolResult.info(
+            t("{what} moved {dx:+.0f}, {dy:+.0f} mm", what=label, dx=offset[0], dy=offset[1]),
+            changed=True,
+        )
+
+    def on_command(self, command: str) -> ToolResult:
+        if command == "cancel":
+            held = bool(self.target)
+            self.target = ""
+            self._offset = np.zeros(3)
+            self._plane_z = None
+            return ToolResult.info(t("put back") if held else "", changed=held)
+        return ToolResult.info("")
+
+    # -- writing it down ----------------------------------------------------
+
+    def _apply(self, key: str, offset: np.ndarray) -> bool:
+        config = self.project.cell_config
+        if not config:
+            return False
+        if key in self.BENCH_KEYS:
+            fixture = dict(config.get("fixture", {}) or {})
+            origin = list(fixture.get("table_origin", [0.0, 0.0, 0.0]))
+            while len(origin) < 3:
+                origin.append(0.0)
+            fixture["table_origin"] = [
+                float(origin[0] + offset[0]),
+                float(origin[1] + offset[1]),
+                float(origin[2]),
+            ]
+            config["fixture"] = fixture
+            self.project.touch()
+            return True
+
+        kind, _, identifier = key.partition(":")
+        entry = self._clamp(identifier) if kind == "clamp" else self._obstacle(identifier)
+        if entry is None:
+            return False
+        field_name = "position" if kind == "clamp" else "centre"
+        current = list(entry.get(field_name, [0.0, 0.0, 0.0]))
+        while len(current) < 3:
+            current.append(0.0)
+        entry[field_name] = [
+            float(current[0] + offset[0]),
+            float(current[1] + offset[1]),
+            float(current[2]),
+        ]
+        self.project.touch()
+        return True
+
+    def _clamp(self, identifier: str) -> dict[str, Any] | None:
+        fixture = (self.project.cell_config or {}).get("fixture", {}) or {}
+        for index, clamp in enumerate(fixture.get("clamps", []) or []):
+            if str(clamp.get("id", f"clamp_{index}")) == identifier:
+                return clamp
+        return None
+
+    def _obstacle(self, identifier: str) -> dict[str, Any] | None:
+        for index, obstacle in enumerate((self.project.cell_config or {}).get("obstacles") or []):
+            if str(obstacle.get("id", f"obstacle_{index}")) == identifier:
+                return obstacle
+        return None
+
+
+# ---------------------------------------------------------------------------
 # placing the part
 # ---------------------------------------------------------------------------
 
@@ -566,6 +1027,31 @@ class PlacePartTool(Tool):
         pose = self.project.placement.copy()
         pose[2, 3] += lift
         return self._apply(pose, f"dropped {lift:+.1f} mm onto the bench")
+
+    def seat_on_bench(self) -> ToolResult:
+        """Put the part in the middle of the bench, resting on it.
+
+        A part arrives in its CAD coordinates, which puts it at the cell
+        origin -- inside the robot column. ``drop_to_table`` deliberately keeps
+        the plan position, so on a fresh import it left the part off the
+        bench, and the first thing every operator did was spend a minute
+        dragging it into view. This is what a freshly imported part should
+        do on its own: centre over the bench, rest on its surface, heading
+        unchanged.
+        """
+        part, cell = self.project.part, self.project.cell
+        if part is None or cell is None:
+            return ToolResult.error("load a part and a cell first")
+        if part.mesh_vertices is None or not len(part.mesh_vertices):
+            return ToolResult.error("the part has no mesh to rest on the bench")
+        pose = self.project.placement.copy()
+        placed = tf.apply_points(pose, part.mesh_vertices)
+        lo, hi = placed.min(axis=0), placed.max(axis=0)
+        origin = np.asarray(cell.fixture.table_origin, dtype=float)
+        pose[0, 3] += float(origin[0] - (lo[0] + hi[0]) / 2.0)
+        pose[1, 3] += float(origin[1] - (lo[1] + hi[1]) / 2.0)
+        pose[2, 3] += float(cell.fixture.table_z_mm - lo[2])
+        return self._apply(pose, "seated on the bench")
 
     def snap_to_jig(self) -> ToolResult:
         """Seat the part on the jig's locators, keeping its current orientation."""

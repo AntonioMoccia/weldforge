@@ -1,0 +1,82 @@
+name: Demo arm (placeholder geometry)
+vendor: none
+reach_mm: 1611
+payload_kg: 16.0
+wrist: spherical
+notes:
+- 'SHAPE DEMONSTRATION ONLY. Confirm nothing from this robot: the kinematics are a
+  KUKA KR 16-2 and the link geometry is boxes and cylinders generated to show that
+  per-link meshes are drawn and animated. Do not use it to judge clearances.'
+- Confirm axis signs, zero offsets and link geometry against the real controller before
+  any generated program is run.
+- 'To draw a real robot: copy its link meshes into data/robots/meshes/<name>/ and
+  add a visual: block like the one in this file to that robot''s own YAML. Vendor
+  and ROS meshes are modelled in the vendor''s link frames, not in the modified DH
+  frames used here, so each link usually needs an xyz/rpy_deg offset set once by comparing
+  the two. See data/robots/meshes/README.md.'
+joints:
+- name: A1
+  alpha: 0.0
+  a: 0.0
+  d: 675.0
+  limit_deg:
+  - -185
+  - 185
+  max_speed_deg_s: 156
+- name: A2
+  alpha: -90.0
+  a: 260.0
+  d: 0.0
+  limit_deg:
+  - -155
+  - 35
+  max_speed_deg_s: 156
+- name: A3
+  alpha: 0.0
+  a: 680.0
+  d: 0.0
+  limit_deg:
+  - -130
+  - 154
+  max_speed_deg_s: 156
+- name: A4
+  alpha: -90.0
+  a: -35.0
+  d: 670.0
+  limit_deg:
+  - -350
+  - 350
+  max_speed_deg_s: 330
+- name: A5
+  alpha: 90.0
+  a: 0.0
+  d: 0.0
+  limit_deg:
+  - -130
+  - 130
+  max_speed_deg_s: 330
+- name: A6
+  alpha: -90.0
+  a: 0.0
+  d: 158.0
+  limit_deg:
+  - -350
+  - 350
+  max_speed_deg_s: 615
+home_deg:
+- 0
+- -90
+- 90
+- 0
+- 60
+- 0
+visual:
+  meshes_dir: demo_arm
+  links:
+  - mesh: base.stl
+  - mesh: link1.stl
+  - mesh: link2.stl
+  - mesh: link3.stl
+  - mesh: link4.stl
+  - mesh: link5.stl
+  - mesh: link6.stl

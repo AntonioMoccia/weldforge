@@ -21,14 +21,14 @@ import numpy as np
 import yaml
 
 from ..geom import transform as tf
-from .robot import JointSpec, RobotModel
+from .robot import JointSpec, LinkVisual, RobotModel
 from .wps_paths import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["load_robot", "available_robots", "torch_frame", "clear_cache"]
 
-_cache: dict[str, RobotModel] = {}
+_cache: dict[tuple[str, str], RobotModel] = {}
 
 
 def torch_frame(
@@ -75,6 +75,78 @@ def _joint_from_dict(data: dict, index: int) -> JointSpec:
     )
 
 
+def _link_visuals(raw: dict | None, folder: Path, n_joints: int) -> list[LinkVisual]:
+    """Read the optional ``visual:`` block of a robot file.
+
+    .. code-block:: yaml
+
+        visual:
+          meshes_dir: kr16_2          # under data/robots/meshes/, or absolute
+          links:
+            - { mesh: base_link.stl }                       # the base casting
+            - { mesh: link_1.stl, rpy_deg: [0, 0, 0] }      # moves with A1
+            - { mesh: link_2.stl, xyz: [0, 0, 0] }          # moves with A2
+            # ... one entry per joint
+
+    A link with no ``mesh`` is a hole in the arm, not an error: a robot whose
+    vendor publishes five of six links is still better drawn than as a stick.
+    Anything that cannot be read is logged and skipped for the same reason --
+    the kinematics do not depend on any of it.
+    """
+    if not raw:
+        return []
+
+    base_dir = Path(str(raw.get("meshes_dir", ""))) if raw.get("meshes_dir") else None
+    if base_dir is not None and not base_dir.is_absolute():
+        base_dir = folder / "meshes" / base_dir
+
+    entries = list(raw.get("links", []) or [])
+    if len(entries) > n_joints + 1:
+        logger.warning(
+            "robot visual lists %d links for %d joints; the extra ones are ignored",
+            len(entries),
+            n_joints,
+        )
+        entries = entries[: n_joints + 1]
+
+    visuals: list[LinkVisual] = []
+    for index, entry in enumerate(entries):
+        item = entry if isinstance(entry, dict) else {"mesh": entry}
+        mesh_name = str(item.get("mesh", "") or "")
+        if not mesh_name:
+            visuals.append(LinkVisual())
+            continue
+        path = Path(mesh_name)
+        if not path.is_absolute() and base_dir is not None:
+            path = base_dir / path
+        xyz = np.asarray(item.get("xyz", [0.0, 0.0, 0.0]), dtype=float)
+        rpy = np.deg2rad(np.asarray(item.get("rpy_deg", [0.0, 0.0, 0.0]), dtype=float))
+        offset = tf.pose(tf.rpy_to_matrix(*rpy), xyz)
+        try:
+            vertices, faces = _read_link_mesh(path)
+        except Exception as exc:
+            logger.error("link %d: %s could not be read (%s)", index, path, exc)
+            visuals.append(LinkVisual(source=str(path), offset=offset))
+            continue
+        visuals.append(
+            LinkVisual(source=str(path), vertices=vertices, faces=faces, offset=offset)
+        )
+    return visuals
+
+
+def _read_link_mesh(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Triangles of one link. Any format the CAD importer reads will do."""
+    from ..cad import load_part
+
+    part = load_part(path)
+    if part.mesh_vertices is None or part.mesh_faces is None or len(part.mesh_faces) == 0:
+        raise ValueError(f"{path.name} has no surface to draw")
+    return (
+        np.asarray(part.mesh_vertices, dtype=float),
+        np.asarray(part.mesh_faces, dtype=np.int64),
+    )
+
+
 def load_robot(
     name: str,
     base: np.ndarray | None = None,
@@ -88,11 +160,15 @@ def load_robot(
     the flange -- useful for checking kinematics, useless for welding, so the
     cell builder always sets them.
     """
-    key = name
+    folder = (Path(data_dir) if data_dir else DATA_DIR) / "robots"
+    # The folder belongs in the key. Keyed by name alone, a second data
+    # directory holding a different robot of the same name silently returned
+    # the first one -- which is how a test fixture, or a site with its own
+    # robot files, gets geometry it did not ask for.
+    key = (name, str(folder))
     if key in _cache and base is None and tool is None:
         return _cache[key]
 
-    folder = (Path(data_dir) if data_dir else DATA_DIR) / "robots"
     path = folder / f"{name}.yaml"
     if not path.exists():
         raise FileNotFoundError(
@@ -115,6 +191,7 @@ def load_robot(
         vendor=str(raw.get("vendor", "")),
         wrist=str(raw.get("wrist", "spherical")),
         notes=[str(n) for n in raw.get("notes", [])],
+        link_visuals=_link_visuals(raw.get("visual"), folder, len(joints)),
     )
     if base is None and tool is None:
         _cache[key] = robot

@@ -11,7 +11,15 @@ from .ik import (
     solve_numeric,
 )
 from .library import available_robots, load_robot, torch_frame
-from .robot import JointSpec, RobotModel, fk, fk_all, jacobian, manipulability
+from .robot import (
+    JointSpec,
+    LinkVisual,
+    RobotModel,
+    fk,
+    fk_all,
+    jacobian,
+    manipulability,
+)
 
 __all__ = [
     "ArmGeometry",
@@ -26,6 +34,7 @@ __all__ = [
     "load_robot",
     "torch_frame",
     "JointSpec",
+    "LinkVisual",
     "RobotModel",
     "fk",
     "fk_all",

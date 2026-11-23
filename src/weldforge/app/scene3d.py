@@ -71,6 +71,12 @@ JOINT_COLOURS: dict[JointType, tuple[float, float, float]] = {
 }
 
 _BACKGROUND = (0.105, 0.125, 0.153)
+
+#: Edges shorter than this are drawn but not offered to a click. A fillet
+#: blend or a chamfer a few millimetres long cannot be a weld, and on a real
+#: part there are dozens of them stealing the pick meant for the edge beside
+#: them. Matches the detector's own minimum seam length.
+MIN_PICK_EDGE_MM = 5.0
 _HIGHLIGHT = (1.0, 0.45, 0.1)
 _SELECTED = (1.0, 0.9, 0.3)
 
@@ -99,6 +105,16 @@ def _vtk():
     import vtk
 
     return vtk
+
+
+def _matrix(pose: np.ndarray) -> Any:
+    """A 4x4 pose as a ``vtkMatrix4x4``, for an actor's user matrix."""
+    vtk = _vtk()
+    matrix = vtk.vtkMatrix4x4()
+    for i in range(4):
+        for j in range(4):
+            matrix.SetElement(i, j, float(pose[i, j]))
+    return matrix
 
 
 def _polydata_from_mesh(vertices: np.ndarray, faces: np.ndarray):
@@ -255,6 +271,8 @@ class Scene3D:
         self._robot: Any | None = None
         self._robot_actor: Any | None = None
         self._torch_actor: Any | None = None
+        #: (frame index, actor, mesh offset) for a robot drawn from link meshes.
+        self._link_actors: list[tuple[int, Any, np.ndarray]] = []
         self._frames: list[dict[str, Any]] = []
         self._highlighted: list[tuple[Any, tuple[float, float, float]]] = []
         self._picker = vtk.vtkCellPicker()
@@ -284,6 +302,7 @@ class Scene3D:
         self._robot = None
         self._robot_actor = None
         self._torch_actor = None
+        self._link_actors = []
         self._frames.clear()
         self._highlighted.clear()
 
@@ -319,16 +338,48 @@ class Scene3D:
             {k: len(v) for k, v in self._actors.items() if v},
         )
 
+    def refresh_cell(self, project: Project, robot: Any | None = None) -> None:
+        """Redraw the cell and the robot, leaving the part and the camera alone.
+
+        Editing a bench dimension used to go through :meth:`set_project`, which
+        tears down every actor in the scene and hands back a camera reset to
+        isometric. Typing a number then threw away the view the operator had
+        set up, which makes a panel of numbers unusable however correct the
+        numbers are. Only what the cell owns is rebuilt here.
+        """
+        for layer in ("cell", "clamps", "datums", "robot"):
+            for actor in self._actors.get(layer, []):
+                self.renderer.RemoveActor(actor)
+                self._actor_meta.pop(id(actor), None)
+            self._actors[layer] = []
+        self._robot_actor = None
+        self._torch_actor = None
+        self._link_actors = []
+
+        if project.cell is not None:
+            self._build_cell(project.cell)
+        if robot is not None:
+            self._robot = robot
+            self._build_robot(robot)
+        self._update_bounds()
+
     def _build_cell(self, cell: WeldCell) -> None:
         fixture = cell.fixture
-        thickness = 60.0
-        centre = np.asarray(fixture.table_origin, dtype=float).copy()
-        centre[2] = fixture.table_z_mm - thickness / 2.0
-        table = _actor(
-            _box_polydata([fixture.table_size_mm[0], fixture.table_size_mm[1], thickness], centre),
-            (0.23, 0.26, 0.31),
-        )
-        self._add("cell", table, "cell", "table")
+        # The box is a stand-in for the bench, and it is what placement and
+        # collision checking measure against. When the operator has imported
+        # the real bench, drawing the box as well would bury the model in a
+        # slab -- so the model is shown and the box stays invisible maths.
+        if not fixture.model_source:
+            thickness = 60.0
+            centre = np.asarray(fixture.table_origin, dtype=float).copy()
+            centre[2] = fixture.table_z_mm - thickness / 2.0
+            table = _actor(
+                _box_polydata(
+                    [fixture.table_size_mm[0], fixture.table_size_mm[1], thickness], centre
+                ),
+                (0.23, 0.26, 0.31),
+            )
+            self._add("cell", table, "cell", "table")
 
         for clamp in fixture.clamps:
             actor = _actor(
@@ -354,14 +405,16 @@ class Scene3D:
         for obstacle in cell.all_obstacles():
             if not obstacle.has_mesh:
                 continue
-            # Obstacles are context, not subject: a solid jig frame hides the
-            # bench and the part, which is what the operator is looking at.
+            # The bench is the subject -- the operator placed the part on it
+            # and is looking at where it sits. Everything else is context: a
+            # solid jig frame or a fence would hide the bench and the part.
+            is_bench = obstacle.kind == "bench"
             actor = _actor(
                 _polydata_from_mesh(
                     tf.apply_points(obstacle.pose, obstacle.vertices), obstacle.faces
                 ),
-                (0.26, 0.30, 0.36),
-                opacity=0.18,
+                (0.23, 0.26, 0.31) if is_bench else (0.26, 0.30, 0.36),
+                opacity=1.0 if is_bench else 0.18,
             )
             self._add("cell", actor, "cell", f"{obstacle.kind}:{obstacle.id}")
 
@@ -408,6 +461,12 @@ class Scene3D:
             strips = []
             for edge_id, edge in part.edges.items():
                 if len(edge.points) < 2:
+                    continue
+                points = np.asarray(edge.points, dtype=float)
+                length = float(np.linalg.norm(np.diff(points, axis=0), axis=1).sum())
+                if length < MIN_PICK_EDGE_MM:
+                    # Operators were landing on "1 edge(s), 1 mm" -- a blend
+                    # between two real edges -- and could not continue.
                     continue
                 strips.append(edge.points)
                 self._edge_by_cell.append(edge_id)
@@ -503,6 +562,9 @@ class Scene3D:
                 self._frames.append(
                     {
                         "arm": np.array([tf.translation_of(f) for f in frames]),
+                        # Full frames as well, so an arm drawn from link
+                        # meshes can be moved by setting six matrices.
+                        "poses": [f.copy() for f in frames],
                         "torch": np.array(
                             [
                                 tf.translation_of(point.pose)
@@ -537,6 +599,14 @@ class Scene3D:
         self._add("robot", column, "cell", "robot_base")
 
         frames = fk_all(robot, robot.home_joints())
+
+        # A real arm when the robot carries link geometry; the stick figure
+        # when it does not. The stick figure is honest about what the published
+        # link lengths support, but nobody recognises their own cell in it.
+        if getattr(robot, "has_visuals", False):
+            self._build_robot_links(robot, frames)
+            return
+
         arm = np.array([tf.translation_of(frame) for frame in frames])
         vtk = _vtk()
         tube = vtk.vtkTubeFilter()
@@ -553,6 +623,35 @@ class Scene3D:
         )
         self._add("robot", self._torch_actor)
 
+    def _build_robot_links(self, robot: Any, frames: list[np.ndarray]) -> None:
+        """One actor per link, each carrying its own frame as a matrix.
+
+        Carried as a matrix rather than baked into the points, so moving the
+        arm through a trajectory is six matrix updates per frame instead of
+        re-tessellating the robot.
+        """
+        self._link_actors = []
+        for index, visual in enumerate(robot.link_visuals):
+            if not visual.has_mesh or index >= len(frames):
+                continue
+            actor = _actor(
+                _polydata_from_mesh(visual.vertices, visual.faces), (0.86, 0.60, 0.16)
+            )
+            actor.SetUserMatrix(_matrix(frames[index] @ visual.offset))
+            self._add("robot", actor, "cell", f"robot:link{index}")
+            self._link_actors.append((index, actor, visual.offset))
+
+        # The torch still gets its own line: it is the thing the operator
+        # watches, and it changes colour while the arc is burning.
+        self._torch_actor = _actor(
+            _polydata_from_polylines(
+                [np.array([tf.translation_of(frames[-2]), tf.translation_of(frames[-1])])]
+            ),
+            (0.85, 0.87, 0.91),
+            line_width=5.0,
+        )
+        self._add("robot", self._torch_actor)
+
     # -- cheap updates ------------------------------------------------------
 
     def update_placement(self, pose: np.ndarray) -> None:
@@ -562,12 +661,8 @@ class Scene3D:
         50 000-triangle weldment per mouse move does not. The actors carry the
         placement as their own matrix instead.
         """
-        vtk = _vtk()
         self._part_transform = np.asarray(pose, dtype=float).copy()
-        matrix = vtk.vtkMatrix4x4()
-        for i in range(4):
-            for j in range(4):
-                matrix.SetElement(i, j, float(self._part_transform[i, j]))
+        matrix = _matrix(self._part_transform)
         for actor in self._part_actors:
             actor.SetUserMatrix(matrix)
 
@@ -583,17 +678,24 @@ class Scene3D:
 
     def set_frame(self, index: int) -> dict[str, Any] | None:
         """Move the arm to animation frame *index*."""
-        if not self._frames or self._robot_actor is None:
+        if not self._frames:
             return None
         frame = self._frames[index % len(self._frames)]
         vtk = _vtk()
-        tube = vtk.vtkTubeFilter()
-        tube.SetInputData(_polydata_from_polylines([frame["arm"]]))
-        tube.SetRadius(28.0)
-        tube.SetNumberOfSides(10)
-        tube.CappingOn()
-        tube.Update()
-        self._robot_actor.GetMapper().SetInputData(tube.GetOutput())
+
+        if self._link_actors:
+            poses = frame.get("poses") or []
+            for link_index, actor, offset in self._link_actors:
+                if link_index < len(poses):
+                    actor.SetUserMatrix(_matrix(poses[link_index] @ offset))
+        elif self._robot_actor is not None:
+            tube = vtk.vtkTubeFilter()
+            tube.SetInputData(_polydata_from_polylines([frame["arm"]]))
+            tube.SetRadius(28.0)
+            tube.SetNumberOfSides(10)
+            tube.CappingOn()
+            tube.Update()
+            self._robot_actor.GetMapper().SetInputData(tube.GetOutput())
         if self._torch_actor is not None:
             self._torch_actor.GetMapper().SetInputData(_polydata_from_polylines([frame["torch"]]))
             # The torch glows while the arc is burning: the clearest possible
@@ -638,6 +740,76 @@ class Scene3D:
 
         local = tf.apply_point(tf.inverse(self._part_transform), world)
         return PickResult(kind=kind, id=identifier, point=world, point_local=local, layer=layer)
+
+    def point_on_view_plane(self, x: float, y: float, through: np.ndarray) -> np.ndarray | None:
+        """Where the ray through ``(x, y)`` crosses the plane facing the camera
+        at *through*.
+
+        Dragging on the horizontal plane is correct and unusable: in an
+        isometric view the camera looks along that plane at a shallow angle,
+        and a few pixels of mouse become metres of bench -- the log showed
+        ``il banco: +311, +2585 mm`` for a nudge. A plane perpendicular to the
+        view direction through the grab point keeps the object under the
+        cursor at constant depth, which is what every CAD does for a free
+        drag. The caller drops the Z of the result to keep the move
+        horizontal.
+        """
+        near = self._world_at(x, y, 0.0)
+        far = self._world_at(x, y, 1.0)
+        if near is None or far is None:
+            return None
+        direction = far - near
+        normal = np.asarray(self.renderer.GetActiveCamera().GetDirectionOfProjection(), float)
+        denominator = float(np.dot(direction, normal))
+        if abs(denominator) < 1e-12:
+            return None
+        t = float(np.dot(np.asarray(through, dtype=float) - near, normal)) / denominator
+        return near + direction * t
+
+    def point_on_plane(self, x: float, y: float, z: float) -> np.ndarray | None:
+        """Where the ray through viewport ``(x, y)`` crosses the plane ``Z = z``.
+
+        Dragging cannot use the picker: the moment the cursor leaves the thing
+        being dragged there is nothing under it to pick, and the drag would
+        stop at the edge of the object. A ray against a plane keeps working
+        anywhere in the viewport.
+        """
+        near = self._world_at(x, y, 0.0)
+        far = self._world_at(x, y, 1.0)
+        if near is None or far is None:
+            return None
+        direction = far - near
+        if abs(direction[2]) < 1e-9:
+            # Looking along the plane: every point on the ray is equally
+            # plausible, so refuse rather than jump the object to infinity.
+            return None
+        t = (z - near[2]) / direction[2]
+        return near + direction * t
+
+    def _world_at(self, x: float, y: float, depth: float) -> np.ndarray | None:
+        self.renderer.SetDisplayPoint(float(x), float(y), float(depth))
+        self.renderer.DisplayToWorld()
+        point = self.renderer.GetWorldPoint()
+        if len(point) < 4 or abs(point[3]) < 1e-12:
+            return None
+        return np.array(point[:3], dtype=float) / point[3]
+
+    def nudge(self, key: str, offset: np.ndarray) -> bool:
+        """Shift the actor labelled *key* by *offset*, without rebuilding.
+
+        Used for drag feedback. The model is written when the drag ends, so
+        this offset is discarded by the next rebuild rather than accumulating.
+        """
+        target = np.asarray(offset, dtype=float)
+        moved = False
+        for actors in self._actors.values():
+            for actor in actors:
+                meta = self._actor_meta.get(id(actor))
+                if meta is None or meta[1] != key:
+                    continue
+                actor.SetPosition(float(target[0]), float(target[1]), float(target[2]))
+                moved = True
+        return moved
 
     def set_pickable(self, layer: str, pickable: bool) -> None:
         """Restrict picking to the layer a tool cares about.

@@ -32,7 +32,15 @@ from ..geom import transform as tf
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["JointSpec", "RobotModel", "fk", "fk_all", "jacobian", "manipulability"]
+__all__ = [
+    "JointSpec",
+    "LinkVisual",
+    "RobotModel",
+    "fk",
+    "fk_all",
+    "jacobian",
+    "manipulability",
+]
 
 
 @dataclass
@@ -87,6 +95,33 @@ class JointSpec:
 
 
 @dataclass
+class LinkVisual:
+    """The shape of one link, for drawing only.
+
+    Why an offset as well as a mesh. The kinematic chain here is modified DH,
+    and nobody models a robot in DH frames -- a vendor STEP or a ROS mesh is
+    modelled in that vendor's own link frame. ``offset`` is the transform from
+    this link's DH frame to the frame the mesh was drawn in, and it has to be
+    set once per robot by someone comparing the two. Without it the arm is
+    assembled out of correctly-shaped links in the wrong places, which looks
+    worse than the stick figure and is harder to diagnose.
+
+    Nothing here affects reach, limits or collision checking: those come from
+    the joint parameters and the capsule model. This is what the operator
+    sees.
+    """
+
+    source: str = ""
+    vertices: np.ndarray | None = None
+    faces: np.ndarray | None = None
+    offset: np.ndarray = field(default_factory=tf.identity)
+
+    @property
+    def has_mesh(self) -> bool:
+        return self.vertices is not None and self.faces is not None and len(self.faces) > 0
+
+
+@dataclass
 class RobotModel:
     """A serial manipulator plus its mounting and tool frames."""
 
@@ -103,6 +138,16 @@ class RobotModel:
     # Structure hint for the analytic solver; see weldforge.kin.ik.
     wrist: str = "spherical"
     notes: list[str] = field(default_factory=list)
+    #: Visual geometry, one entry per frame of :func:`fk_all` from the base up
+    #: to the flange -- so ``link_visuals[0]`` is the base casting and
+    #: ``link_visuals[i]`` the link that moves with joint *i*. Empty means the
+    #: arm is drawn as a stick figure from the kinematic chain, which is all
+    #: the published link lengths support.
+    link_visuals: list[LinkVisual] = field(default_factory=list)
+
+    @property
+    def has_visuals(self) -> bool:
+        return any(v.has_mesh for v in self.link_visuals)
 
     @property
     def n_joints(self) -> int:

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import sys
 import traceback
 from collections.abc import Callable
 from pathlib import Path
@@ -30,8 +31,19 @@ from typing import Any
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..diagnostics import format_report, log_dir, log_file, report, setup_logging
 from ..geom import transform as tf
+from ..i18n import (
+    LANGUAGE_NAMES,
+    available_languages,
+    language,
+    load_preferred_language,
+    save_preferred_language,
+    set_language,
+    t,
+)
 from .panels import (
+    CellPanel,
     OutputPanel,
     PlacementPanel,
     ProcedurePanel,
@@ -44,20 +56,73 @@ from .project import (
     Project,
     ProjectError,
     RecentFiles,
+    attach_bench,
+    attach_obstacle,
     attach_part,
+    cell_for,
+    clear_bench,
     load_project,
+    materialise_bench,
+    remove_obstacle,
     save_project,
 )
 from .scene3d import LAYERS, Scene3D
 from .send import SendTarget, dispatch
-from .tools import PlacePartTool, SelectTool, Tool, TraceSeamTool
+from .tools import MoveCellTool, PlacePartTool, SelectTool, Tool, TraceSeamTool, TwoFaceTool
+from .translate import apply_language
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["MainWindow", "main"]
 
-CAD_FILTER = "CAD files (*.step *.stp *.iges *.igs *.brep *.stl *.obj *.ply);;All files (*)"
+
+def _cad_filter() -> str:
+    """Build the import filter from what the loader actually supports.
+
+    Derived rather than written out, because a format added to the loader and
+    forgotten here is a format the operator cannot select -- which looks
+    exactly like a broken import.
+    """
+    from ..cad.loader import BREP_SUFFIXES, MESH_SUFFIXES
+
+    brep = " ".join(f"*{s}" for s in sorted(BREP_SUFFIXES))
+    mesh = " ".join(f"*{s}" for s in sorted(MESH_SUFFIXES))
+    return (
+        f"CAD files ({brep} {mesh})"
+        f";;Exact geometry - STEP, IGES, BREP ({brep})"
+        f";;Meshes - STL, OBJ, PLY ({mesh})"
+        ";;All files (*)"
+    )
+
+
+def _default_language() -> str:
+    """The language a machine with no saved choice starts in.
+
+    Italian, because this is built for an Italian shop floor and an operator
+    should not have to find a menu in a language they struggle with in order
+    to change the language. English remains one menu entry away, and is what
+    the command line and the API keep.
+    """
+    from ..i18n import DEFAULT_LANGUAGE, available_languages
+
+    return "it" if "it" in available_languages() else DEFAULT_LANGUAGE
+
+
+CAD_FILTER = _cad_filter()
 PROJECT_FILTER = f"WeldForge project (*{PROJECT_SUFFIX});;All files (*)"
+
+#: Keys the active tool gets first refusal on, wherever the focus is. Defined
+#: once because they are dispatched from two places: the window's own key
+#: handler, and the filter on the 3-D viewport, which would otherwise swallow
+#: them (see ``_build_viewport``).
+TOOL_KEYS: dict[int, str] = {
+    QtCore.Qt.Key_Return: "accept",
+    QtCore.Qt.Key_Enter: "accept",
+    QtCore.Qt.Key_Escape: "cancel",
+    QtCore.Qt.Key_Backspace: "undo",
+    QtCore.Qt.Key_Delete: "delete",
+    QtCore.Qt.Key_Space: "toggle",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +133,9 @@ PROJECT_FILTER = f"WeldForge project (*{PROJECT_SUFFIX});;All files (*)"
 class _WorkerSignals(QtCore.QObject):
     finished = QtCore.Signal(object)
     failed = QtCore.Signal(str)
+    # Summary plus the full traceback. A separate signal rather than a wider
+    # ``failed``, so the handlers that only want the one-liner stay as they are.
+    failed_detail = QtCore.Signal(str, str)
     progress = QtCore.Signal(str)
 
 
@@ -78,9 +146,24 @@ class _Worker(QtCore.QRunnable):
     planning run that hits bad geometry must leave the application usable.
     """
 
-    def __init__(self, work: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        work: Callable[..., Any],
+        *args: Any,
+        parent: QtCore.QObject | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__()
-        self.signals = _WorkerSignals()
+        # The thread pool deletes a runnable the moment run() returns -- and
+        # with it, this signals object, if nothing else owns it. The result is
+        # emitted as a *queued* call to the UI thread, so if the deletion wins
+        # the race the connection is gone and the slot never runs: an import
+        # that finished in the worker and never reached the window. Operators
+        # saw exactly that, sometimes, and clicked Import again. The signals
+        # object is parented to the window and the runnable is kept alive by
+        # the caller until the result has been delivered.
+        self.signals = _WorkerSignals(parent)
+        self.setAutoDelete(False)
         self._work = work
         self._args = args
         self._kwargs = kwargs
@@ -90,11 +173,51 @@ class _Worker(QtCore.QRunnable):
         try:
             result = self._work(*self._args, **self._kwargs)
         except Exception as exc:
-            logger.exception("background task failed")
-            self.signals.failed.emit(f"{type(exc).__name__}: {exc}")
-            logger.debug(traceback.format_exc())
+            detail = traceback.format_exc()
+            logger.error("background task failed\n%s", detail)
+            # A message an operator can read, and the traceback behind it. The
+            # message alone was not enough to diagnose a failed CAD import on a
+            # machine we could not reach.
+            summary = _summarise(exc)
+            self.signals.failed_detail.emit(summary, detail)
+            self.signals.failed.emit(summary)
         else:
             self.signals.finished.emit(result)
+
+
+def _summarise(exc: BaseException) -> str:
+    """One readable line (or paragraph) for an exception.
+
+    Our own errors already carry text written for an operator, so they are
+    shown as-is; anything else gets its class name, which is the only clue a
+    bare ``KeyError: 3`` offers.
+    """
+    from ..cad.loader import UnsupportedCadFormat
+
+    text = str(exc).strip()
+    if isinstance(exc, UnsupportedCadFormat | FileNotFoundError) and text:
+        return text
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _widget_needs_keys() -> bool:
+    """True when the focused widget uses Enter / Esc / Backspace itself.
+
+    Those keys mean "commit this field", "undo this edit" or "delete a
+    character" inside a text or number editor, and a tool taking them from
+    there would make the panels unusable while a line is being traced.
+    """
+    focus = QtWidgets.QApplication.focusWidget()
+    if focus is None:
+        return False
+    editors = (
+        QtWidgets.QLineEdit,
+        QtWidgets.QAbstractSpinBox,
+        QtWidgets.QTextEdit,
+        QtWidgets.QPlainTextEdit,
+        QtWidgets.QComboBox,
+    )
+    return isinstance(focus, editors) or isinstance(focus.parent(), QtWidgets.QAbstractSpinBox)
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +239,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.recent = RecentFiles()
         self.pool = QtCore.QThreadPool.globalInstance()
         self._busy = 0
+        #: Workers in flight, kept alive until their result has been delivered.
+        self._workers: list[_Worker] = []
 
         self._build_viewport()
         self._build_panels()
@@ -127,7 +252,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._play_timer.timeout.connect(self._advance_frame)
         self._frame = 0
 
+        # The language before the first refresh, so nothing is ever shown in
+        # a language the operator did not pick.
+        set_language(load_preferred_language(_default_language()))
+        apply_language(self)
+
         self._load_cell(self.project.cell_name)
+        # The cell is drawn before the first paint. It used to appear only
+        # once something forced a rebuild -- an import, a cell change -- so the
+        # window opened on an empty viewport and the bench looked as if it
+        # depended on there being a part. The cell is the room; the part is
+        # what comes into it.
+        self._rebuild_scene()
         self._refresh_all()
 
     # -- construction -------------------------------------------------------
@@ -139,8 +275,20 @@ class MainWindow(QtWidgets.QMainWindow):
         frame = QtWidgets.QFrame()
         layout = QtWidgets.QVBoxLayout(frame)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # One line above the viewport saying what to do next. The window has
+        # four function keys and a dozen panels; an operator should not have to
+        # hold the order of operations in their head to use it.
+        self.guide = QtWidgets.QLabel("")
+        self.guide.setWordWrap(True)
+        self.guide.setStyleSheet(
+            "background: #2b333f; color: #e8ecf2; padding: 10px 14px; font-size: 15px;"
+        )
+        layout.addWidget(self.guide)
+
         self.vtk_widget = QVTKRenderWindowInteractor(frame)
-        layout.addWidget(self.vtk_widget)
+        layout.addWidget(self.vtk_widget, 1)
         self.setCentralWidget(frame)
 
         renderer = vtk.vtkRenderer()
@@ -153,6 +301,24 @@ class MainWindow(QtWidgets.QMainWindow):
         # Left click goes to the active tool; the camera keeps middle and
         # right, so orbiting never fights picking.
         interactor.AddObserver("LeftButtonPressEvent", self._on_left_click, 1.0)
+        # Dragging needs the mouse between press and release. The camera keeps
+        # middle and right, so a drag never fights an orbit.
+        interactor.AddObserver("MouseMoveEvent", self._on_mouse_move, 1.0)
+        interactor.AddObserver("LeftButtonReleaseEvent", self._on_left_release, 1.0)
+
+        # QVTKRenderWindowInteractor.keyPressEvent forwards the key to VTK and
+        # returns without calling super() or ignoring the event, so Qt treats
+        # it as handled and it never reaches this window. Since an operator
+        # must click in the viewport to pick an edge -- which gives the widget
+        # focus -- Enter, Esc, Backspace, Space and Delete all stopped working
+        # exactly when a tool needed them: a traced weld line could be drawn
+        # and never accepted. The filter runs before the widget sees the key.
+        self.vtk_widget.installEventFilter(self)
+        # And on the application, for the keys a tool is waiting for: Enter
+        # pressed with the focus in a panel spin box was being eaten by the
+        # spin box, so a traced line could never be accepted from there.
+        QtWidgets.QApplication.instance().installEventFilter(self)
+
         self.vtk_widget.Initialize()
         interactor.Start()
 
@@ -164,6 +330,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setup_panel = SetupPanel()
         self.setup_panel.cellChanged.connect(self._on_cell_changed)
         self.setup_panel.settingsChanged.connect(self._on_settings_changed)
+
+        self.cell_panel = CellPanel()
+        self.cell_panel.cellEdited.connect(self._on_cell_edited)
+        self.cell_panel.benchImportRequested.connect(self.import_bench)
+        self.cell_panel.benchClearRequested.connect(self.clear_bench_model)
+        self.cell_panel.saveRequested.connect(self.save_cell)
+        self.cell_panel.obstacleImportRequested.connect(self.import_obstacle)
+        self.cell_panel.obstacleRemoveRequested.connect(self.remove_obstacle_model)
 
         self.placement_panel = PlacementPanel()
         self.placement_panel.actionRequested.connect(self._on_placement_action)
@@ -196,8 +370,13 @@ class MainWindow(QtWidgets.QMainWindow):
         container = QtWidgets.QWidget()
         box = QtWidgets.QVBoxLayout(container)
         box.addWidget(self.setup_panel)
+        box.addWidget(self._titled("The cell", self.cell_panel))
         box.addWidget(self._titled("Placement", self.placement_panel), 1)
-        left.setWidget(container)
+        container_scroll = QtWidgets.QScrollArea()
+        container_scroll.setWidgetResizable(True)
+        container_scroll.setWidget(container)
+        container_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        left.setWidget(container_scroll)
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, left)
 
         right = QtWidgets.QDockWidget("Weld seams", self)
@@ -242,6 +421,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act(file_menu, "&New", self.new_project, "Ctrl+N")
         self._act(file_menu, "&Open project...", self.open_project, "Ctrl+O")
         self._act(file_menu, "Import &CAD...", self.import_cad, "Ctrl+I")
+        self._act(file_menu, "Import &bench model...", self.import_bench, "Ctrl+B")
         file_menu.addSeparator()
         self._act(file_menu, "&Save", self.save, "Ctrl+S")
         self._act(file_menu, "Save &as...", self.save_as, "Ctrl+Shift+S")
@@ -255,8 +435,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tool_group = QtGui.QActionGroup(self)
         for key, label, shortcut in (
             ("select", "Select", "1"),
-            ("trace", "Trace weld line", "2"),
+            # Two surfaces -> seam, groove and torch direction derived. The
+            # front door for tracing; edge-by-edge stays for the odd case.
+            ("twofaces", "Trace weld from two faces", "2"),
+            ("trace", "Trace along edges (advanced)", "Shift+2"),
             ("place", "Place part", "3"),
+            ("move", "Move cell elements", "4"),
         ):
             action = QtGui.QAction(label, self, checkable=True)
             action.setShortcut(shortcut)
@@ -267,6 +451,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 action.setChecked(True)
 
         plan_menu = self.menuBar().addMenu("&Plan")
+        self._act(plan_menu, "&Prepare the job", self.prepare_job, "F9")
+        plan_menu.addSeparator()
         self._act(plan_menu, "&Detect seams", self.detect_seams, "F5")
         self._act(plan_menu, "Generate &procedures", lambda: self._on_regenerate(""), "F6")
         self._act(
@@ -275,6 +461,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act(plan_menu, "Plan the &job", self._on_plan, "F8")
 
         view_menu = self.menuBar().addMenu("&View")
+        self.layer_actions: dict[str, QtGui.QAction] = {}
         for name, label, _, default in LAYERS:
             action = QtGui.QAction(label, self, checkable=True)
             action.setChecked(default)
@@ -282,6 +469,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda state, n=name: (self.scene.set_layer_visible(n, state), self._render())
             )
             view_menu.addAction(action)
+            self.layer_actions[name] = action
         view_menu.addSeparator()
         for key, label, shortcut in (
             ("iso", "Isometric", "Ctrl+0"),
@@ -291,13 +479,32 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             self._act(view_menu, label, lambda _=False, k=key: self._set_view(k), shortcut)
 
+        # A failed import on a machine we cannot reach is diagnosed from these
+        # two entries, so they are in the menu bar rather than buried.
+        help_menu = self.menuBar().addMenu("&Help")
+        self._act(help_menu, "&Diagnostics...", self.show_diagnostics, "F1")
+        self._act(help_menu, "Open &log folder", self.open_log_folder)
+        help_menu.addSeparator()
+        language_menu = help_menu.addMenu("&Language")
+        self.language_group = QtGui.QActionGroup(self)
+        for code in available_languages():
+            # Each language in its own name: somebody looking for theirs should
+            # not have to read another one to find it.
+            action = QtGui.QAction(LANGUAGE_NAMES.get(code, code), self, checkable=True)
+            action.setChecked(code == language())
+            action.triggered.connect(lambda _=False, c=code: self.set_language(c))
+            self.language_group.addAction(action)
+            language_menu.addAction(action)
+
         toolbar = self.addToolBar("Main")
         toolbar.setObjectName("toolbar_main")
         toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        # Three buttons, in the order a job happens. Detect, procedures,
+        # placement and plan are all inside "Prepare the job" now; they stay
+        # in the Plan menu for when one of them has to be run on its own.
         for label, slot in (
             ("Import CAD", self.import_cad),
-            ("Detect seams", self.detect_seams),
-            ("Plan", self._on_plan),
+            ("Prepare the job", self.prepare_job),
             ("Save", self.save),
         ):
             action = QtGui.QAction(label, self)
@@ -320,10 +527,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress.setMaximumWidth(180)
         self.progress.setRange(0, 0)
         self.progress.hide()
+        # Accept / cancel as buttons, shown only while a tool is mid-action.
+        # The keys still work, but the log showed an operator reaching "Enter
+        # to accept" twice and never getting a seam: Enter went to the spin
+        # box that still had the focus. A button has no focus to lose.
+        self.accept_button = QtWidgets.QPushButton("Accept (Enter)")
+        self.accept_button.setStyleSheet("font-weight: bold;")
+        self.accept_button.clicked.connect(lambda: self._tool_command(QtCore.Qt.Key_Return))
+        self.cancel_button = QtWidgets.QPushButton("Cancel (Esc)")
+        self.cancel_button.clicked.connect(lambda: self._tool_command(QtCore.Qt.Key_Escape))
+        self.accept_button.hide()
+        self.cancel_button.hide()
+
         bar = self.statusBar()
         bar.addWidget(self.status_prompt, 1)
         bar.addWidget(self.status_detail, 2)
+        bar.addWidget(self.accept_button)
+        bar.addWidget(self.cancel_button)
         bar.addPermanentWidget(self.progress)
+
+    def _update_tool_buttons(self) -> None:
+        busy = bool(self.tool.busy())
+        self.accept_button.setVisible(busy)
+        self.cancel_button.setVisible(busy)
 
     # -- helpers ------------------------------------------------------------
 
@@ -351,20 +577,46 @@ class MainWindow(QtWidgets.QMainWindow):
     def _run(self, work, on_done, message: str) -> None:
         """Run *work* off the UI thread; call *on_done* with its result."""
         self._busy_start(message)
-        worker = _Worker(work)
+        worker = _Worker(work, parent=self)
+        # Held until the result lands; see _Worker.__init__ for why.
+        self._workers.append(worker)
+
+        def release():
+            self._busy_end()
+            with contextlib.suppress(ValueError):
+                self._workers.remove(worker)
 
         def done(result):
-            self._busy_end()
-            on_done(result)
+            release()
+            # ``on_done`` runs on the UI thread, where an exception would be
+            # swallowed by Qt and leave the window looking as if nothing had
+            # happened. Report it the same way as a failure in the worker.
+            try:
+                on_done(result)
+            except Exception as exc:
+                detail = traceback.format_exc()
+                logger.error("completion handler failed\n%s", detail)
+                self._report_failure(_summarise(exc), detail)
 
-        def failed(text):
-            self._busy_end()
-            self._say(text, error=True)
-            QtWidgets.QMessageBox.critical(self, "WeldForge", text)
+        def failed(summary, detail):
+            release()
+            self._report_failure(summary, detail)
 
         worker.signals.finished.connect(done)
-        worker.signals.failed.connect(failed)
+        worker.signals.failed_detail.connect(failed)
         self.pool.start(worker)
+
+    def _report_failure(self, summary: str, detail: str = "") -> None:
+        """Show a failure, with the traceback and the log file behind it."""
+        self._say(summary.splitlines()[0] if summary else t("failed"), error=True)
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Critical)
+        box.setWindowTitle("WeldForge")
+        box.setText(summary or t("The operation failed."))
+        box.setInformativeText(f"Full details are in the log file:\n{log_file()}")
+        if detail:
+            box.setDetailedText(detail)
+        box.exec()
 
     def _update_title(self) -> None:
         mark = " *" if self.project.dirty else ""
@@ -373,12 +625,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _refresh_all(self) -> None:
         self.setup_panel.load(self.project)
         self.setup_panel.describe(self.project)
+        self.cell_panel.load(self.project.cell_config)
+        self.cell_panel.describe(self.project)
         self.placement_panel.load(self.project)
         self.seam_panel.load(self.project)
         self.simulation_panel.show_report(self.project.last_report)
         self.output_panel.show_history(self.project)
         self._update_title()
         self.status_prompt.setText(self.tool.prompt())
+        self._update_guide()
 
     def _rebuild_scene(self) -> None:
         self.scene.set_project(self.project, self.robot)
@@ -389,22 +644,163 @@ class MainWindow(QtWidgets.QMainWindow):
     # -- cell ---------------------------------------------------------------
 
     def _load_cell(self, name: str) -> None:
-        from ..fixture import cell_robot, load_cell
+        """Build the project's cell: its own description, or the named one."""
+        from ..fixture import cell_robot, read_cell_config
 
         try:
-            self.project.cell = load_cell(name)
             self.project.cell_name = name
+            if not self.project.cell_config:
+                # Every later edit -- a typed number, a dragged clamp -- works
+                # on this description, so it has to exist from the first load
+                # rather than appearing when something is changed.
+                self.project.cell_config = read_cell_config(name)
+            self.project.cell = cell_for(self.project)
             self.robot = cell_robot(self.project.cell)
-        except FileNotFoundError as exc:
-            self._say(str(exc), error=True)
+        except (FileNotFoundError, ValueError, KeyError) as exc:
+            self._say(f"cell {name!r}: {exc}", error=True)
 
     def _on_cell_changed(self, name: str) -> None:
-        self._load_cell(name)
+        """A different cell was picked from the library.
+
+        Its description replaces the project's, because the operator asked for
+        that cell -- keeping the old bench numbers under a new cell's name
+        would be a cell that exists nowhere.
+        """
+        from ..fixture import read_cell_config
+
+        try:
+            self.project.cell_config = read_cell_config(name)
+        except FileNotFoundError as exc:
+            self._say(str(exc), error=True)
+            return
+        self.project.bench_bytes = None
+        self.project.bench_filename = ""
+        self._reload_cell_from_config(t("cell: {name}", name=name))
+
+    def _on_cell_edited(self, raw: object) -> None:
+        """The bench numbers changed in the cell panel."""
+        self.project.cell_config = dict(raw)  # type: ignore[arg-type]
+        # The panel is the source of these numbers, so it is not reloaded:
+        # rebuilding the clamp table while somebody is typing in it takes the
+        # cursor out of the cell they are editing.
+        self._reload_cell_from_config("", reload_panel=False)
+
+    def _reload_cell_from_config(self, message: str, reload_panel: bool = True) -> None:
+        """Rebuild the cell from its description and redraw what stands on it.
+
+        Deliberately not ``_rebuild_scene`` plus ``_refresh_all``. Those tear
+        down every actor and reset the camera to isometric, and reload every
+        panel -- so adjusting a bench dimension threw away the operator's view
+        and rebuilt the clamp table under their hands, taking the focus out of
+        the field they were typing in. A cell edit redraws the cell.
+
+        *reload_panel* is false when the cell panel is the thing that asked for
+        the change: it already holds those numbers, and reloading it mid-edit
+        is what loses the row being edited.
+        """
+        self._load_cell(self.project.cell_name)
         self.project.touch()
+        self.scene.refresh_cell(self.project, self.robot)
+        if reload_panel:
+            self.cell_panel.load(self.project.cell_config)
+        self.cell_panel.describe(self.project)
         self.setup_panel.describe(self.project)
-        self._rebuild_scene()
+        self._update_title()
+        self._render()
+        if message:
+            self._say(message)
+
+    def import_bench(self) -> None:
+        """Import a 3-D model of the real bench."""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, t("Import bench model"), "", CAD_FILTER
+        )
+        if not path:
+            return
+
+        def work():
+            return attach_bench(self.project, path)
+
+        def done(_raw):
+            self._reload_cell_from_config("")
+            fixture = self.project.cell.fixture if self.project.cell else None
+            if fixture is not None:
+                self._say(
+                    f"bench {Path(path).name}: "
+                    f"{fixture.table_size_mm[0]:.0f} x {fixture.table_size_mm[1]:.0f} mm, "
+                    f"surface at {fixture.table_z_mm:.0f} mm"
+                )
+
+        self._run(work, done, f"importing {Path(path).name} as the bench...")
+
+    def clear_bench_model(self) -> None:
+        if not self.project.bench_filename and not (
+            self.project.cell_config or {}
+        ).get("fixture", {}).get("model"):
+            self._say(t("there is no bench model to remove"))
+            return
+        clear_bench(self.project)
+        self._reload_cell_from_config(t("bench model removed; the bench is a plain slab again"))
+
+    def import_obstacle(self) -> None:
+        """Import a 3-D model -- a jig, a housing -- as an obstacle in the cell."""
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, t("Import obstacle model"), "", CAD_FILTER
+        )
+        if not path:
+            return
+
+        def work():
+            return attach_obstacle(self.project, path)
+
+        def done(entry):
+            self._reload_cell_from_config(
+                t("{name} imported: drag it (tool 4) to where it stands", name=entry["name"])
+            )
+
+        self._run(work, done, f"importing {Path(path).name} as an obstacle...")
+
+    def remove_obstacle_model(self, obstacle_id: str) -> None:
+        if not remove_obstacle(self.project, obstacle_id):
+            self._say(t("there is no obstacle {id} to remove", id=obstacle_id), error=True)
+            return
+        self._reload_cell_from_config(t("obstacle {id} removed", id=obstacle_id))
+
+    def save_cell(self, name: str) -> None:
+        """Keep this cell in the library, so the next job starts from it."""
+        from ..fixture import default_cell_config, save_cell_config
+
+        raw = dict(self.project.cell_config or default_cell_config())
+        # The bench model lives inside the project, so hand ``save_cell_config``
+        # a real file to copy beside the YAML: a saved cell has to stand on its
+        # own, the way a saved project does.
+        bench = materialise_bench(self.project)
+        if bench is not None:
+            raw = {**raw, "fixture": {**raw.get("fixture", {}), "model": str(bench)}}
+        if self.project.obstacle_models:
+            # Imported obstacles likewise: give the saver a real file for each
+            # one that lives only inside the project. Box obstacles have no
+            # model and are left exactly as they are.
+            from .project import _materialise_obstacle
+
+            obstacles = []
+            for entry in raw.get("obstacles", []) or []:
+                entry = dict(entry)
+                path = _materialise_obstacle(self.project, str(entry.get("id", "")))
+                if path is not None:
+                    entry["model"] = str(path)
+                obstacles.append(entry)
+            raw = {**raw, "obstacles": obstacles}
+        try:
+            path = save_cell_config(raw, name)
+        except OSError as exc:
+            self._report_failure(t("could not save the cell: {error}", error=exc))
+            return
+        self.project.cell_name = name
+        self.project.cell_config = raw
+        self.setup_panel.reload_cells(name)
         self._refresh_all()
-        self._say(f"cell: {name}")
+        self._say(t("cell saved as {name} ({path})", name=name, path=path))
 
     def _on_settings_changed(self) -> None:
         self.setup_panel.apply(self.project)
@@ -438,10 +834,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scene.clear()
         self._rebuild_scene()
         self._refresh_all()
-        self._say("new project")
+        self._say(t("new project"))
 
     def import_cad(self) -> None:
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import CAD", "", CAD_FILTER)
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, t("Import CAD"), "", CAD_FILTER)
         if not path:
             return
 
@@ -451,6 +847,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def done(part):
             self._load_cell(self.project.cell_name)
+            # A part arrives in CAD coordinates, which is the cell origin --
+            # inside the robot column. Seat it on the bench unless the
+            # operator has locked a measured placement, in which case the
+            # new geometry goes exactly where the old one was.
+            if not self.project.placement_locked:
+                PlacePartTool(self.project).seat_on_bench()
             self._rebuild_scene()
             self._refresh_all()
             lo, hi = part.bbox
@@ -462,12 +864,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._run(work, done, f"importing {Path(path).name}...")
 
+    # -- diagnostics --------------------------------------------------------
+
+    def show_diagnostics(self) -> None:
+        """What this installation can read, in a dialog that copies out."""
+        text = format_report(report())
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(t("WeldForge diagnostics"))
+        box.setIcon(QtWidgets.QMessageBox.Information)
+        box.setText(t("Send this to support if an import fails."))
+        box.setDetailedText(text)
+        copy = box.addButton(t("Copy"), QtWidgets.QMessageBox.ActionRole)
+        box.addButton(QtWidgets.QMessageBox.Close)
+        box.exec()
+        if box.clickedButton() is copy:
+            QtWidgets.QApplication.clipboard().setText(text)
+            self._say(t("diagnostics copied to the clipboard"))
+
+    def open_log_folder(self) -> None:
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(log_dir())))
+
     def open_project(self, path: str = "") -> None:
         if not self._confirm_discard():
             return
         if not path:
             path, _ = QtWidgets.QFileDialog.getOpenFileName(
-                self, "Open project", "", PROJECT_FILTER
+                self, t("Open project"), "", PROJECT_FILTER
             )
         if not path:
             return
@@ -495,7 +917,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def save_as(self) -> bool:
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Save project",
+            t("Save project"),
             f"{self.project.display_name}{PROJECT_SUFFIX}",
             PROJECT_FILTER,
         )
@@ -533,23 +955,60 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tool = TraceSeamTool(self.project)
         elif key == "place":
             self.tool = PlacePartTool(self.project)
+        elif key == "twofaces":
+            self.tool = TwoFaceTool(self.project)
+        elif key == "move":
+            self.tool = MoveCellTool(self.project)
         else:
             self.tool = SelectTool(self.project)
         if self.tool.pick_layers:
             self.scene.pick_only(*self.tool.pick_layers)
-            # Tracing needs the edges visible to click them.
+            # Tracing needs the edges visible to click them: VTK will not pick
+            # an actor it is not drawing, and the edges layer starts hidden.
             if key == "trace":
-                self.scene.set_layer_visible("edges", True)
+                self._show_layer("edges")
         else:
             self.scene.restore_pickable()
         self.status_prompt.setText(self.tool.prompt())
+        self._update_tool_buttons()
         self._render()
 
     def _on_left_click(self, interactor, event) -> None:
         x, y = interactor.GetEventPosition()
         pick = self.scene.pick(x, y)
-        result = self.tool.on_pick(pick)
-        self._handle_tool_result(result)
+        self._handle_tool_result(self.tool.on_pick(pick))
+
+    def _on_mouse_move(self, interactor, event) -> None:
+        """Feed a dragging tool the cursor, projected onto its drag plane."""
+        if not self.tool.dragging():
+            return
+        plane_z = self.tool.drag_plane_z()
+        if plane_z is None:
+            return
+        x, y = interactor.GetEventPosition()
+        through = self.tool.drag_through()
+        if through is not None:
+            # A plane facing the camera through the grab point: the object
+            # stays under the cursor whatever the view angle. The horizontal
+            # plane, seen nearly edge-on in an isometric view, turned a few
+            # pixels into metres of bench.
+            point = self.scene.point_on_view_plane(x, y, through)
+        else:
+            point = self.scene.point_on_plane(x, y, plane_z)
+        if point is None:
+            return
+        result = self.tool.on_drag(point)
+        nudge = self.tool.drag_preview()
+        if nudge is not None:
+            self.scene.nudge(nudge[0], nudge[1])
+        if result.message:
+            self._say(result.message, error=not result.ok)
+        self._render()
+
+    def _on_left_release(self, interactor, event) -> None:
+        if not self.tool.dragging():
+            return
+        self._handle_tool_result(self.tool.on_drop())
 
     def _handle_tool_result(self, result) -> None:
         if result.message:
@@ -561,35 +1020,79 @@ class MainWindow(QtWidgets.QMainWindow):
             self.scene.highlight("seam", result.seam_id)
             self.seam_panel.select(result.seam_id)
             self.procedure_panel.show_seam(self.project, result.seam_id)
-        if result.changed:
+        if result.changed and isinstance(self.tool, MoveCellTool):
+            # Moving a cell element changes the cell, so the cell is what has
+            # to be rebuilt -- and the panel's numbers follow the drag.
+            self._reload_cell_from_config("")
+        elif result.changed:
             self.scene.refresh_seams(self.project)
             self.seam_panel.load(self.project)
             self._update_title()
         if result.finished:
             self.set_tool("select")
         self.status_prompt.setText(self.tool.prompt())
+        self._update_tool_buttons()
         self._render()
 
+    def set_language(self, code: str) -> None:
+        """Switch the window's language and remember the choice."""
+        chosen = set_language(code)
+        save_preferred_language(chosen)
+        self._retranslate()
+        self._say(f"{LANGUAGE_NAMES.get(chosen, chosen)}")
+
+    def _retranslate(self) -> None:
+        """Put every piece of furniture into the current language.
+
+        The panels and the menus are walked rather than rebuilt: rebuilding
+        them would throw away what the operator has selected, and a language
+        change is not a reason to lose your place.
+        """
+        apply_language(self)
+        self.status_prompt.setText(self.tool.prompt())
+        self._refresh_all()
+
+    def _show_layer(self, name: str) -> None:
+        """Turn a layer on, keeping its View-menu tick honest."""
+        self.scene.set_layer_visible(name, True)
+        action = self.layer_actions.get(name)
+        if action is not None and not action.isChecked():
+            action.blockSignals(True)
+            action.setChecked(True)
+            action.blockSignals(False)
+
+    def _tool_command(self, key: int) -> bool:
+        """Route a key to the active tool. True when the tool took it."""
+        command = TOOL_KEYS.get(key)
+        if command is None:
+            return False
+        self._handle_tool_result(self.tool.on_command(command))
+        return True
+
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # noqa: N802
-        key = event.key()
-        commands = {
-            QtCore.Qt.Key_Return: "accept",
-            QtCore.Qt.Key_Enter: "accept",
-            QtCore.Qt.Key_Escape: "cancel",
-            QtCore.Qt.Key_Backspace: "undo",
-            QtCore.Qt.Key_Delete: "delete",
-            QtCore.Qt.Key_Space: "toggle",
-        }
-        if key in commands:
-            self._handle_tool_result(self.tool.on_command(commands[key]))
+        if self._tool_command(event.key()):
             return
         super().keyPressEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        """Give the tool first refusal on keys pressed inside the 3-D view."""
+        if event.type() == QtCore.QEvent.KeyPress and event.key() in TOOL_KEYS:
+            # Inside the viewport the tool always has first refusal. Anywhere
+            # else it gets the key only while it is mid-action, and never from
+            # a widget that needs Enter or Esc itself: a line edit being typed
+            # in, a spin box, a combo that is open.
+            in_viewport = watched is getattr(self, "vtk_widget", None)
+            tool = getattr(self, "tool", None)
+            wanted = in_viewport or (tool is not None and tool.busy() and not _widget_needs_keys())
+            if wanted and self._tool_command(event.key()):
+                return True
+        return super().eventFilter(watched, event)
 
     # -- placement ----------------------------------------------------------
 
     def _on_placement_action(self, action: str) -> None:
         if self.project.part is None:
-            self._say("import a CAD model first", error=True)
+            self._say(t("import a CAD model first"), error=True)
             return
         tool = self.tool if isinstance(self.tool, PlacePartTool) else PlacePartTool(self.project)
 
@@ -638,12 +1141,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._say("import a CAD model first", error=True)
             return
 
-        from ..seams import DetectOptions, detect_seams
+        from ..seams import DetectOptions, detect_seams, explain_no_seams
 
         part = self.project.part
+        options = DetectOptions()
 
         def work():
-            return detect_seams(part, DetectOptions())
+            return detect_seams(part, options)
 
         def done(result):
             seams, report = result
@@ -658,7 +1162,16 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             if kept:
                 message += f"; {kept} hand-traced seam(s) kept"
-            self._say(message)
+            if not seams:
+                # "0 seams" on its own reads as a broken import, and usually
+                # is not: say which it is.
+                reason = explain_no_seams(part, report, options)
+                self._say(f"{message} -- {reason}", error=True)
+                QtWidgets.QMessageBox.information(
+                    self, "WeldForge", f"No weld seams were detected.\n\n{reason}."
+                )
+            else:
+                self._say(message)
 
         self._run(work, done, "detecting weld seams...")
 
@@ -792,7 +1305,117 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # -- planning -----------------------------------------------------------
 
+    # -- the one button -----------------------------------------------------
+
+    def prepare_job(self) -> None:
+        """Detect, generate, place, plan and simulate -- then say one thing.
+
+        The steps were four function keys in a fixed order, and an operator who
+        pressed them out of order got a refusal rather than a result. They are
+        one action now. What it cannot decide for you it hands back: a part
+        with no joints to find puts you straight into tracing, with the reason
+        on screen, instead of reporting "0 seams" and stopping.
+
+        It ends at the simulation -- the verdict that needs no cell connected.
+        Moving the real robot stays a separate, deliberate action.
+        """
+        if self.project.part is None:
+            self._say(t("import a CAD model first"), error=True)
+            self._update_guide()
+            return
+
+        self.setup_panel.apply(self.project)
+        part, options = self.project.part, None
+
+        def work():
+            from ..seams import DetectOptions, detect_seams
+
+            return detect_seams(part, DetectOptions())
+
+        def done(result):
+            seams, report = result
+            kept = self.project.replace_detected_seams(seams)
+            self.scene.refresh_seams(self.project)
+            self.seam_panel.load(self.project)
+
+            if not self.project.selected_seams:
+                # Nothing to weld that the geometry could find. Say why, and
+                # leave the operator in the tool that solves it rather than
+                # making them find it.
+                from ..seams import DetectOptions, explain_no_seams
+
+                reason = explain_no_seams(part, report, DetectOptions())
+                self.set_tool("twofaces")
+                self._say(reason, error=True)
+                self._update_guide(
+                    t(
+                        "No joint was found automatically ({reason}). Click the two "
+                        "surfaces of a joint to weld it.",
+                        reason=reason,
+                    )
+                )
+                return
+
+            found = t(
+                "{count} seams, {mm:.0f} mm",
+                count=len(self.project.selected_seams),
+                mm=sum(s.length_mm for s in self.project.selected_seams),
+            )
+            if kept:
+                found += t(" (+{kept} traced by hand)", kept=kept)
+            self._say(t("{found}: planning...", found=found))
+            self._plan_job(after_prepare=True)
+
+        _ = options
+        self._run(work, done, t("looking for the weld seams..."))
+
+    def _verdict(self) -> str:
+        """The plan's answer in one line, in the operator's words."""
+        report = self.project.last_report or {}
+        if not report:
+            return ""
+        errors = list(report.get("errors") or [])
+        warnings = list(report.get("warnings") or [])
+        if errors:
+            more = t(" (+{count} more)", count=len(errors) - 1) if len(errors) > 1 else ""
+            return t("Cannot be welded as it is: {reason}{more}", reason=errors[0], more=more)
+        ready = t(
+            "Ready: {count} seams, cycle {cycle:.0f} s, {wire:.0f} g of wire",
+            count=len(self.project.selected_seams),
+            cycle=float(report.get("cycle_time_s", 0.0)),
+            wire=float(report.get("wire_consumption_kg", 0.0)) * 1000.0,
+        )
+        if warnings:
+            ready += t(". {count} warning(s) -- see the report", count=len(warnings))
+        return ready
+
+    def _update_guide(self, message: str = "") -> None:
+        """Say what to do next, or show *message* when something is in hand."""
+        if message:
+            self.guide.setText(message)
+            return
+        if self.project.part is None:
+            text = t("Step 1 - import the CAD model: File > Import CAD (Ctrl+I).")
+        elif not self.project.seams:
+            text = t(
+                "Step 2 - press Prepare the job (F9): it looks for the joints and "
+                "plans everything. If none are found you will be put into tracing."
+            )
+        elif not self.project.last_report:
+            text = t("Step 3 - press Prepare the job (F9) to plan and simulate.")
+        else:
+            verdict = self._verdict()
+            text = (
+                t("{verdict} - generate the program in the Program panel.", verdict=verdict)
+                if (self.project.last_report or {}).get("ok")
+                else verdict
+            )
+        self.guide.setText(text)
+
     def _on_plan(self) -> None:
+        self._plan_job(after_prepare=False)
+
+    def _plan_job(self, after_prepare: bool = False) -> None:
         if self.project.part is None or self.project.cell is None:
             self._say("import a CAD model first", error=True)
             return
@@ -837,15 +1460,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_all()
             self.simulation_panel.show_report(self.project.last_report)
             report = job.report
-            self._say(
-                f"{'plan OK' if report.ok else 'plan reported problems'}: "
-                f"{report.cycle_time_s:.0f} s cycle, "
-                f"{report.wire_consumption_kg * 1000:.0f} g wire, "
-                f"{len(report.errors)} error(s)",
-                error=not report.ok,
-            )
+            # One line, in the operator's words, wherever the plan came from.
+            # The numbers behind it are in the simulation panel.
+            self._say(self._verdict(), error=not report.ok)
+            self._update_guide()
+            _ = after_prepare
 
-        self._run(work, done, "planning the job...")
+        self._run(work, done, t("planning the job..."))
 
     # -- playback -----------------------------------------------------------
 
@@ -931,9 +1552,15 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "WeldForge", text)
 
         self._busy_start(f"sending to {send_target.describe()}...")
-        worker = _Worker(work)
-        worker.signals.finished.connect(lambda r: (self._busy_end(), done(r)))
-        worker.signals.failed.connect(failed)
+        worker = _Worker(work, parent=self)
+        self._workers.append(worker)
+
+        def release():
+            with contextlib.suppress(ValueError):
+                self._workers.remove(worker)
+
+        worker.signals.finished.connect(lambda r: (release(), self._busy_end(), done(r)))
+        worker.signals.failed.connect(lambda text: (release(), failed(text)))
         self.pool.start(worker)
 
     # -- view ---------------------------------------------------------------
@@ -963,9 +1590,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def main(argv: list[str] | None = None) -> int:
-    import sys
+    # Before anything else: this is a GUI entry point, so without a log file
+    # a crash during start-up leaves no trace at all.
+    setup_logging("studio")
+    _install_excepthook()
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     app = QtWidgets.QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("WeldForge Studio")
     app.setOrganizationName("WeldForge")
@@ -984,12 +1613,35 @@ def main(argv: list[str] | None = None) -> int:
             window.open_project(str(path))
             break
         if path.exists():
-            attach_part(window.project, path)
-            window._rebuild_scene()
-            window._refresh_all()
+            # A file that will not load is a reason to show the error, not to
+            # refuse to start: the operator can still import another one.
+            try:
+                attach_part(window.project, path)
+                window._rebuild_scene()
+                window._refresh_all()
+            except Exception as exc:
+                window._report_failure(_summarise(exc), traceback.format_exc())
             break
 
     return app.exec()
+
+
+def _install_excepthook() -> None:
+    """Route uncaught exceptions to the log instead of a dead window.
+
+    Qt catches exceptions raised inside slots and keeps going, which on a GUI
+    build means they are lost entirely. Logging them is what makes a bug
+    report possible.
+    """
+    previous = sys.excepthook
+
+    def hook(kind, value, tb):
+        logging.getLogger("weldforge").error(
+            "uncaught exception\n%s", "".join(traceback.format_exception(kind, value, tb))
+        )
+        previous(kind, value, tb)
+
+    sys.excepthook = hook
 
 
 def _apply_dark_palette(app: QtWidgets.QApplication) -> None:

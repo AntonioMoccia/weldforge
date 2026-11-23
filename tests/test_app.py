@@ -391,6 +391,142 @@ def test_tracing_warns_when_the_groove_is_an_outside_corner(tee_project: Project
 
 
 @requires_cad
+def test_a_fresh_import_is_seated_in_the_middle_of_the_bench(tee_project: Project):
+    """A part in CAD coordinates sits at the cell origin: inside the robot.
+
+    ``drop_to_table`` keeps the plan position on purpose, so on a fresh import
+    it left the part off the bench and the operator dragging it into view.
+    Seating centres it over the bench and rests it on the surface, with the
+    heading left alone.
+    """
+    project = _clone(tee_project)
+    project.placement = tf.pose(tf.rot_z(np.deg2rad(30.0)), [0.0, 0.0, 0.0])  # as imported
+    tool = PlacePartTool(project)
+
+    result = tool.seat_on_bench()
+    assert result.ok and result.changed
+
+    placed = tf.apply_points(project.placement, project.part.mesh_vertices)
+    fixture = project.cell.fixture
+    centre = (placed.min(axis=0) + placed.max(axis=0)) / 2.0
+    assert centre[0] == pytest.approx(fixture.table_origin[0], abs=0.5)
+    assert centre[1] == pytest.approx(fixture.table_origin[1], abs=0.5)
+    assert float(placed[:, 2].min()) == pytest.approx(fixture.table_z_mm, abs=0.5)
+    # Heading untouched: still the 30 degrees it came in with.
+    assert np.allclose(project.placement[:3, :3], tf.rot_z(np.deg2rad(30.0)), atol=1e-9)
+
+    # And it really is on the bench, not merely near it.
+    half = np.asarray(fixture.table_size_mm) / 2.0
+    assert np.all(placed[:, 0] >= fixture.table_origin[0] - half[0] - 0.5)
+    assert np.all(placed[:, 0] <= fixture.table_origin[0] + half[0] + 0.5)
+
+
+@requires_cad
+def test_two_faces_give_the_seam_the_detector_found(tee_project: Project):
+    """Click the two surfaces of a joint and get seam, groove and torch for free.
+
+    The operator says *what* is welded -- this plate onto that one -- and the
+    seam, its groove angle and the torch direction are derived rather than
+    clicked edge by edge. On the tee assembly the derived seam must agree with
+    the detector's own on the same two faces.
+    """
+    from weldforge.app.scene3d import PickResult
+    from weldforge.app.tools import TwoFaceTool
+
+    project = _clone(tee_project)
+    reference = max(project.seams, key=lambda s: s.length_mm)
+    assert reference.face_a_id and reference.face_b_id, "the detector names its faces"
+    project.seams = []
+
+    tool = TwoFaceTool(project)
+    assert not tool.busy()
+    first = tool.on_pick(PickResult(kind="face", id=reference.face_a_id))
+    assert first.ok and tool.busy()
+    assert tool.preview() is None, "one face is not a joint yet"
+
+    second = tool.on_pick(PickResult(kind="face", id=reference.face_b_id))
+    assert second.ok, second.message
+    assert tool.preview() is not None, "two faces give a seam to look at"
+
+    accepted = tool.on_command("accept")
+    assert accepted.ok and accepted.finished and accepted.seam_id
+    traced = project.seam(accepted.seam_id)
+    assert traced is not None and project.is_manual(traced.id)
+    assert traced.joint_type is reference.joint_type
+    assert traced.length_mm == pytest.approx(reference.length_mm, rel=0.05)
+    assert np.rad2deg(traced.mean_dihedral) == pytest.approx(
+        np.rad2deg(reference.mean_dihedral), abs=3.0
+    )
+    assert not tool.busy()
+
+
+@requires_cad
+def test_two_faces_that_do_not_meet_are_refused(tee_project: Project):
+    from weldforge.app.scene3d import PickResult
+    from weldforge.app.tools import TwoFaceTool
+
+    project = _clone(tee_project)
+    reference = max(project.seams, key=lambda s: s.length_mm)
+    tool = TwoFaceTool(project)
+
+    # The same surface twice is not a joint.
+    tool.on_pick(PickResult(kind="face", id=reference.face_a_id))
+    same = tool.on_pick(PickResult(kind="face", id=reference.face_a_id))
+    assert not same.ok and same.message
+
+    # Two faces of different bodies that are nowhere near each other: the
+    # face on the plate furthest from the rib cannot be welded to the rib's top.
+    faces = project.part.faces
+    far_apart = None
+    for fid, face in faces.items():
+        if face.solid_id == faces[reference.face_a_id].solid_id:
+            continue
+        distance = float(np.linalg.norm(face.centroid - faces[reference.face_a_id].centroid))
+        if far_apart is None or distance > far_apart[0]:
+            far_apart = (distance, fid)
+    assert far_apart is not None
+    tool.on_command("cancel")
+    tool.on_pick(PickResult(kind="face", id=reference.face_a_id))
+    refused = tool.on_pick(PickResult(kind="face", id=far_apart[1]))
+    if refused.ok:
+        # Only acceptable if those faces genuinely touch somewhere.
+        assert tool.preview() is not None
+    else:
+        assert refused.message and tool.preview() is None
+
+
+@requires_cad
+def test_a_second_click_on_the_last_edge_accepts_the_line(tee_project: Project):
+    """Clicking the edge you just picked again is how people say "done".
+
+    The log showed thirteen such clicks in one session, each answered with
+    "that edge is already in the line" -- and no seam ever added. While a
+    line is open the tool also reports itself busy, which is what lets Enter
+    reach it from a panel widget that still has the focus.
+    """
+    from weldforge.app.scene3d import PickResult
+
+    project = _clone(tee_project)
+    project.seams = []
+    tool = TraceSeamTool(project)
+    assert not tool.busy()
+
+    def length(edge_id: str) -> float:
+        points = np.asarray(project.part.edges[edge_id].points, dtype=float)
+        return float(np.linalg.norm(np.diff(points, axis=0), axis=1).sum())
+
+    edge_id = max(project.part.edges, key=length)
+    first = tool.on_pick(PickResult(kind="edge", id=edge_id))
+    assert first.ok and tool.busy()
+
+    again = tool.on_pick(PickResult(kind="edge", id=edge_id))
+    assert again.ok, again.message
+    assert again.finished and again.seam_id, "the second click accepted the line"
+    assert project.seam(again.seam_id) is not None
+    assert not tool.busy()
+
+
+@requires_cad
 def test_placing_the_part_drops_it_onto_the_table(tee_project: Project):
     project = _clone(tee_project)
     tool = PlacePartTool(project)

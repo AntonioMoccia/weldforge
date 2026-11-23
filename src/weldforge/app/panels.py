@@ -8,6 +8,7 @@ headless even where the 3-D view cannot.
 The panels are, left to right as the window lays them out:
 
 ``SetupPanel``       cell, material, consumable, torch
+``CellPanel``        the bench itself: size, height, where it is, its model
 ``PlacementPanel``   where the part sits, and how it got there
 ``SeamPanel``        every weld seam, selectable and editable
 ``ProcedurePanel``   the welding procedure for one seam, pass by pass
@@ -18,6 +19,7 @@ The panels are, left to right as the window lays them out:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -32,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "SetupPanel",
+    "CellPanel",
     "PlacementPanel",
     "SeamPanel",
     "ProcedurePanel",
@@ -124,6 +127,24 @@ class SetupPanel(QtWidgets.QWidget):
 
     # -- binding ------------------------------------------------------------
 
+    def reload_cells(self, select: str = "") -> None:
+        """Re-read the cell library, so a cell just saved can be picked.
+
+        Without this the operator saves their bench and then cannot select it
+        until the application is restarted.
+        """
+        from ..fixture import available_cells
+
+        current = select or self.cell_box.currentText()
+        self.cell_box.blockSignals(True)
+        try:
+            self.cell_box.clear()
+            self.cell_box.addItems(available_cells())
+            if current:
+                self.cell_box.setCurrentText(current)
+        finally:
+            self.cell_box.blockSignals(False)
+
     def load(self, project: Project) -> None:
         """Show the project's settings without emitting change signals."""
         for widget in (
@@ -134,6 +155,11 @@ class SetupPanel(QtWidgets.QWidget):
             self.leg_ratio,
         ):
             widget.blockSignals(True)
+        # A project carries its own cell description, so its cell may not be
+        # in this machine's library at all. Showing some other cell's name
+        # would misreport what the operator is actually looking at.
+        if project.cell_name and self.cell_box.findText(project.cell_name) < 0:
+            self.cell_box.addItem(project.cell_name)
         self.cell_box.setCurrentText(project.cell_name)
         self.material_box.setCurrentText(project.base_material)
         self.machine_box.setCurrentText(project.machine_profile)
@@ -174,6 +200,574 @@ class SetupPanel(QtWidgets.QWidget):
         if project.cell.external_axes:
             bits.append("positioner: " + ", ".join(a.name for a in project.cell.external_axes))
         self.info.setText(" | ".join(bits))
+
+
+# ---------------------------------------------------------------------------
+# the cell itself
+# ---------------------------------------------------------------------------
+
+
+class CellPanel(QtWidgets.QWidget):
+    """The bench: how big it is, how high, where it stands, what it looks like.
+
+    These are the numbers an operator measures once with a tape and then wants
+    left alone -- which is why editing them here and saving them is the point.
+    Bench height and distance from the robot decide whether a seam can be
+    welded downhand at all, so an operator who cannot change them cannot
+    describe their own cell.
+
+    The panel edits the cell's description -- the same dictionary the YAML
+    holds -- and emits it. Rebuilding the cell and redrawing is the window's
+    job, because that needs the 3-D scene and this must stay headless.
+    """
+
+    #: The cell description changed; the window rebuilds the cell from it.
+    cellEdited = QtCore.Signal(object)
+    #: Import a 3-D model as the bench / drop the one already imported.
+    benchImportRequested = QtCore.Signal()
+    benchClearRequested = QtCore.Signal()
+    #: Import a 3-D model as an obstacle (a jig, a housing) / drop one by id.
+    obstacleImportRequested = QtCore.Signal()
+    obstacleRemoveRequested = QtCore.Signal(str)
+    #: Save the current cell under a name, so other jobs can start from it.
+    saveRequested = QtCore.Signal(str)
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._raw: dict[str, Any] = {}
+        self._loading = False
+
+        layout = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        form.setLabelAlignment(QtCore.Qt.AlignRight)
+        layout.addLayout(form)
+
+        self.cell_name = QtWidgets.QLineEdit()
+        self.cell_name.setPlaceholderText("My cell")
+        self.cell_name.editingFinished.connect(self._emit)
+        form.addRow(*_row("Cell name", self.cell_name))
+
+        # Which arm is in the cell. It lived only in the cell file before, so
+        # there was no way to change the robot without editing YAML -- and the
+        # robot is the first thing anyone wants to change.
+        from ..kin import available_robots
+
+        self.robot_box = QtWidgets.QComboBox()
+        self.robot_box.addItems(available_robots())
+        self.robot_box.setToolTip(
+            "The arm in this cell. Reach and joint limits come from its data\n"
+            "sheet; its shape is drawn from link meshes when the robot file\n"
+            "has them, and as a stick figure when it does not."
+        )
+        self.robot_box.currentTextChanged.connect(lambda _="": self._emit())
+        form.addRow(*_row("Robot", self.robot_box))
+
+        # -- the bench -------------------------------------------------------
+        self.length = _spin(100.0, 20000.0, 1000.0, 10.0, 0)
+        self.length.setSuffix(" mm")
+        self.length.setToolTip("Bench size along X, the direction away from the robot.")
+        self.width = _spin(100.0, 20000.0, 800.0, 10.0, 0)
+        self.width.setSuffix(" mm")
+        self.width.setToolTip("Bench size along Y, across the robot.")
+        self.height = _spin(0.0, 3000.0, 750.0, 10.0, 0)
+        self.height.setSuffix(" mm")
+        self.height.setToolTip(
+            "Height of the working surface above the robot's mounting face.\n"
+            "The part is dropped onto this plane."
+        )
+        form.addRow(*_row("Bench length (X)", self.length))
+        form.addRow(*_row("Bench width (Y)", self.width))
+        form.addRow(*_row("Surface height (Z)", self.height))
+
+        # -- where it stands -------------------------------------------------
+        self.origin_x = _spin(-20000.0, 20000.0, 1000.0, 10.0, 0)
+        self.origin_y = _spin(-20000.0, 20000.0, 0.0, 10.0, 0)
+        for box, tip in (
+            (self.origin_x, "Distance of the bench centre from the robot, along X."),
+            (self.origin_y, "Offset of the bench centre across the robot, along Y."),
+        ):
+            box.setSuffix(" mm")
+            box.setToolTip(tip)
+        form.addRow(*_row("Bench centre X", self.origin_x))
+        form.addRow(*_row("Bench centre Y", self.origin_y))
+
+        self.capacity = _spin(0.0, 20000.0, 300.0, 10.0, 0)
+        self.capacity.setSuffix(" kg")
+        self.capacity.setToolTip("What the bench or positioner is rated to carry.")
+        form.addRow(*_row("Load capacity", self.capacity))
+
+        # -- the robot on it -------------------------------------------------
+        self.robot_z = _spin(-3000.0, 3000.0, 0.0, 10.0, 0)
+        self.robot_z.setSuffix(" mm")
+        self.robot_z.setToolTip("Height of the robot's mounting face: a pedestal or a riser.")
+        self.robot_yaw = _spin(-180.0, 180.0, 0.0, 5.0, 1)
+        self.robot_yaw.setSuffix(" deg")
+        self.robot_yaw.setToolTip("Rotation of the robot about Z, if it does not face the bench.")
+        form.addRow(*_row("Robot base Z", self.robot_z))
+        form.addRow(*_row("Robot base yaw", self.robot_yaw))
+
+        for box in (
+            self.length,
+            self.width,
+            self.height,
+            self.origin_x,
+            self.origin_y,
+            self.capacity,
+            self.robot_z,
+            self.robot_yaw,
+        ):
+            box.valueChanged.connect(lambda _=0.0: self._emit())
+
+        # -- the bench model -------------------------------------------------
+        layout.addWidget(_separator())
+        self.model_label = QtWidgets.QLabel("No bench model: shown as a plain slab.")
+        self.model_label.setWordWrap(True)
+        self.model_label.setStyleSheet("color: #9aa6b5;")
+        layout.addWidget(self.model_label)
+
+        model_row = QtWidgets.QHBoxLayout()
+        self.import_button = QtWidgets.QPushButton("Import bench model...")
+        self.import_button.setToolTip(
+            "A STEP or STL of the real bench. Its top becomes the working\n"
+            "surface and its footprint the area a part may sit on."
+        )
+        self.import_button.clicked.connect(self.benchImportRequested)
+        self.clear_button = QtWidgets.QPushButton("Remove model")
+        self.clear_button.clicked.connect(self.benchClearRequested)
+        model_row.addWidget(self.import_button)
+        model_row.addWidget(self.clear_button)
+        layout.addLayout(model_row)
+
+        # -- obstacles: jigs, housings, fences -------------------------------
+        layout.addWidget(_separator())
+        obstacle_label = QtWidgets.QLabel("Obstacles")
+        obstacle_label.setToolTip(
+            "Things the torch must stay out of: a welding jig, a positioner\n"
+            "housing, a fence. Import one as a STEP or STL; it lands on the\n"
+            "bench centre and can be dragged (tool 4) to where it stands."
+        )
+        layout.addWidget(obstacle_label)
+        self.obstacle_list = QtWidgets.QListWidget()
+        self.obstacle_list.setMaximumHeight(90)
+        layout.addWidget(self.obstacle_list)
+        obstacle_row = QtWidgets.QHBoxLayout()
+        self.import_obstacle_button = QtWidgets.QPushButton("Import obstacle model...")
+        self.import_obstacle_button.clicked.connect(self.obstacleImportRequested)
+        self.remove_obstacle_button = QtWidgets.QPushButton("Remove obstacle")
+        self.remove_obstacle_button.clicked.connect(self._on_remove_obstacle)
+        obstacle_row.addWidget(self.import_obstacle_button)
+        obstacle_row.addWidget(self.remove_obstacle_button)
+        layout.addLayout(obstacle_row)
+
+        # -- the clamps ------------------------------------------------------
+        layout.addWidget(_separator())
+        clamp_label = QtWidgets.QLabel("Clamps")
+        clamp_label.setToolTip(
+            "Where the part is held. The torch is kept out of a cylinder of the\n"
+            "given radius and height around each one, and placement prefers a\n"
+            "pose that keeps the seams clear of them."
+        )
+        layout.addWidget(clamp_label)
+        self.clamp_table = _ClampTable()
+        self.clamp_table.changed.connect(self._emit)
+        self.clamp_table.add_button.clicked.connect(self._on_add_clamp)
+        layout.addWidget(self.clamp_table)
+
+        # -- saving it -------------------------------------------------------
+        layout.addWidget(_separator())
+        save_row = QtWidgets.QHBoxLayout()
+        self.save_name = QtWidgets.QLineEdit()
+        self.save_name.setPlaceholderText("name to save this cell under")
+        self.save_button = QtWidgets.QPushButton("Save cell")
+        self.save_button.setToolTip(
+            "Keep this cell so a new job can start from it, instead of\n"
+            "describing the bench again every time."
+        )
+        self.save_button.clicked.connect(self._on_save)
+        self.save_name.returnPressed.connect(self._on_save)
+        save_row.addWidget(self.save_name, 1)
+        save_row.addWidget(self.save_button)
+        layout.addLayout(save_row)
+
+        self.info = QtWidgets.QLabel("")
+        self.info.setWordWrap(True)
+        self.info.setStyleSheet("color: #9aa6b5;")
+        layout.addWidget(self.info)
+        layout.addStretch(1)
+
+    # -- binding ------------------------------------------------------------
+
+    def load(self, raw: dict[str, Any] | None) -> None:
+        """Show cell description *raw* without emitting a change."""
+        from ..fixture import default_cell_config
+
+        self._raw = dict(raw or default_cell_config())
+        fixture = dict(self._raw.get("fixture", {}) or {})
+        size = list(fixture.get("table_size_mm", [1000.0, 800.0]))
+        origin = list(fixture.get("table_origin", [1000.0, 0.0, 0.0]))
+        base = dict(self._raw.get("robot_base", {}) or {})
+        xyz = list(base.get("xyz", [0.0, 0.0, 0.0]))
+        rpy = list(base.get("rpy_deg", [0.0, 0.0, 0.0]))
+
+        self._loading = True
+        try:
+            self.cell_name.setText(str(self._raw.get("name", "")))
+            robot = str(self._raw.get("robot", "") or "")
+            if robot and self.robot_box.findText(robot) < 0:
+                # A cell may name a robot this machine does not have. Showing
+                # some other robot's name would misreport the cell.
+                self.robot_box.addItem(robot)
+            if robot:
+                self.robot_box.setCurrentText(robot)
+            self.length.setValue(float(size[0]))
+            self.width.setValue(float(size[1]))
+            self.height.setValue(float(fixture.get("table_z_mm", 0.0)))
+            self.origin_x.setValue(float(origin[0]))
+            self.origin_y.setValue(float(origin[1]))
+            self.capacity.setValue(float(fixture.get("load_capacity_kg", 500.0)))
+            self.robot_z.setValue(float(xyz[2]) if len(xyz) > 2 else 0.0)
+            self.robot_yaw.setValue(float(rpy[2]) if len(rpy) > 2 else 0.0)
+            self.clamp_table.load(fixture.get("clamps"))
+        finally:
+            self._loading = False
+
+        model = str(fixture.get("model", "") or "")
+        self.clear_button.setEnabled(bool(model))
+        self.obstacle_list.clear()
+        for entry in self._raw.get("obstacles", []) or []:
+            label = str(entry.get("name") or entry.get("id") or "obstacle")
+            if entry.get("model"):
+                label += f"  [{Path(str(entry['model'])).name}]"
+            item = QtWidgets.QListWidgetItem(label)
+            item.setData(QtCore.Qt.UserRole, str(entry.get("id", "")))
+            self.obstacle_list.addItem(item)
+        self.remove_obstacle_button.setEnabled(self.obstacle_list.count() > 0)
+        if model:
+            self.model_label.setText(
+                f"Bench model: {model}. The box below is still what placement and "
+                "collision checking measure against, so keep it fitted to the model."
+            )
+        else:
+            self.model_label.setText("No bench model: the bench is drawn as a plain slab.")
+        if not self.save_name.text():
+            self.save_name.setText(_slug(str(self._raw.get("name", ""))))
+
+    def describe(self, project: Project) -> None:
+        """One line on what the cell currently is."""
+        if project.cell is None:
+            self.info.setText("")
+            return
+        fixture = project.cell.fixture
+        bits = [
+            project.cell.robot_name,
+            f"{fixture.table_size_mm[0]:.0f} x {fixture.table_size_mm[1]:.0f} mm "
+            f"at {fixture.table_z_mm:.0f} mm",
+            f"centre ({fixture.table_origin[0]:.0f}, {fixture.table_origin[1]:.0f})",
+            f"{len(fixture.clamps)} clamp(s)",
+        ]
+        if fixture.model_source:
+            bits.append(f"model {Path(fixture.model_source).name}")
+        self.info.setText(" | ".join(bits))
+
+    def config(self) -> dict[str, Any]:
+        """The description as the widgets now read."""
+        raw = dict(self._raw)
+        fixture = dict(raw.get("fixture", {}) or {})
+        fixture["table_size_mm"] = [float(self.length.value()), float(self.width.value())]
+        fixture["table_z_mm"] = float(self.height.value())
+        fixture["table_origin"] = [float(self.origin_x.value()), float(self.origin_y.value()), 0.0]
+        fixture["load_capacity_kg"] = float(self.capacity.value())
+        fixture["clamps"] = self.clamp_table.clamps()
+        raw["fixture"] = fixture
+
+        base = dict(raw.get("robot_base", {}) or {})
+        xyz = list(base.get("xyz", [0.0, 0.0, 0.0]))
+        while len(xyz) < 3:
+            xyz.append(0.0)
+        xyz[2] = float(self.robot_z.value())
+        rpy = list(base.get("rpy_deg", [0.0, 0.0, 0.0]))
+        while len(rpy) < 3:
+            rpy.append(0.0)
+        rpy[2] = float(self.robot_yaw.value())
+        raw["robot_base"] = {"xyz": xyz, "rpy_deg": rpy}
+
+        name = self.cell_name.text().strip()
+        if name:
+            raw["name"] = name
+        robot = self.robot_box.currentText().strip()
+        if robot:
+            raw["robot"] = robot
+        self._raw = raw
+        return raw
+
+    # -- signals ------------------------------------------------------------
+
+    def _emit(self) -> None:
+        if self._loading:
+            return
+        self.cellEdited.emit(self.config())
+
+    def _on_add_clamp(self) -> None:
+        """Put a new clamp on the bench, not at the robot's feet.
+
+        A clamp that appears at the origin is a clamp the operator has to drag
+        across the whole table before it means anything, so a new one lands on
+        the bench surface, offset from its centre to clear the one before it.
+        """
+        count = self.clamp_table.table.rowCount()
+        step = 150.0
+        # Walk the four corners of a square about the bench centre, so four
+        # clamps added in a row land where four clamps usually go.
+        offset_x = step if count % 2 else -step
+        offset_y = step if (count // 2) % 2 else -step
+        self.clamp_table.add(
+            (
+                float(self.origin_x.value()) + offset_x,
+                float(self.origin_y.value()) + offset_y,
+                float(self.height.value()),
+            )
+        )
+
+    def _on_remove_obstacle(self) -> None:
+        item = self.obstacle_list.currentItem()
+        if item is None:
+            self.info.setText("select an obstacle to remove")
+            return
+        self.obstacleRemoveRequested.emit(str(item.data(QtCore.Qt.UserRole) or ""))
+
+    def _on_save(self) -> None:
+        name = _slug(self.save_name.text() or self.cell_name.text())
+        if not name:
+            self.info.setText("give the cell a name before saving it")
+            return
+        self.saveRequested.emit(name)
+
+
+#: Clamp arm directions an operator actually sets, as (label, vector). A clamp
+#: that comes from somewhere else keeps whatever the cell file says: the combo
+#: grows an entry for it rather than rounding it to the nearest axis.
+_APPROACHES: tuple[tuple[str, tuple[float, float, float]], ...] = (
+    ("from above", (0.0, 0.0, 1.0)),
+    ("from below", (0.0, 0.0, -1.0)),
+    ("from +X", (1.0, 0.0, 0.0)),
+    ("from -X", (-1.0, 0.0, 0.0)),
+    ("from +Y", (0.0, 1.0, 0.0)),
+    ("from -Y", (0.0, -1.0, 0.0)),
+)
+
+
+class _ClampTable(QtWidgets.QWidget):
+    """The clamps on the fixture, one row each.
+
+    Spin boxes rather than typed-in text: a clamp position is a measurement,
+    and a table that can hold ``12o`` in a millimetre field is a table that
+    will eventually be asked to plan around it.
+    """
+
+    changed = QtCore.Signal()
+
+    COLUMNS = ("Name", "X", "Y", "Z", "Arm", "Radius", "Height", "Open")
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._loading = False
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.table = QtWidgets.QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(list(self.COLUMNS))
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.AllEditTriggers)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        for column in range(1, len(self.COLUMNS)):
+            header.setSectionResizeMode(column, QtWidgets.QHeaderView.ResizeToContents)
+        self.table.setMinimumHeight(120)
+        layout.addWidget(self.table)
+
+        buttons = QtWidgets.QHBoxLayout()
+        self.add_button = QtWidgets.QPushButton("Add clamp")
+        self.remove_button = QtWidgets.QPushButton("Remove")
+        self.remove_button.setToolTip("Remove the selected clamp.")
+        buttons.addWidget(self.add_button)
+        buttons.addWidget(self.remove_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        self.remove_button.clicked.connect(self.remove_selected)
+        self.table.itemChanged.connect(self._on_item_changed)
+
+    # -- binding ------------------------------------------------------------
+
+    def load(self, clamps: list[dict[str, Any]] | None) -> None:
+        self._loading = True
+        try:
+            self.table.setRowCount(0)
+            for clamp in clamps or []:
+                self._append(clamp)
+        finally:
+            self._loading = False
+
+    def clamps(self) -> list[dict[str, Any]]:
+        """The rows as the cell file's clamp entries."""
+        out: list[dict[str, Any]] = []
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            stored = (name_item.data(QtCore.Qt.UserRole) or {}) if name_item else {}
+            spins = [self._spin(row, column) for column in (1, 2, 3, 5, 6)]
+            combo = self._combo(row, 4)
+            check = self._check(row, 7)
+            if combo is None or check is None or any(box is None for box in spins):
+                # A row still being built. Its stored entry is what it will be,
+                # so reporting that beats dropping the clamp or raising.
+                out.append(dict(stored))
+                continue
+            entry = dict(stored)
+            entry["id"] = stored.get("id") or f"c{row + 1}"
+            entry["name"] = name_item.text() if name_item else ""
+            entry["position"] = [float(box.value()) for box in spins[:3]]
+            entry["approach"] = list(combo.currentData())
+            entry["clearance_mm"] = float(spins[3].value())
+            entry["height_mm"] = float(spins[4].value())
+            entry["retractable"] = check.isChecked()
+            out.append(entry)
+        return out
+
+    def add(self, position: tuple[float, float, float]) -> None:
+        """Add a clamp at *position*, which the caller picks off the bench."""
+        used = {c.get("id", "") for c in self.clamps()}
+        index = len(used) + 1
+        while f"c{index}" in used:
+            index += 1
+        self._append(
+            {
+                "id": f"c{index}",
+                "name": f"clamp {index}",
+                "position": list(position),
+                "approach": [0.0, 0.0, 1.0],
+                "clearance_mm": 45.0,
+                "height_mm": 120.0,
+                "retractable": False,
+            }
+        )
+        self.table.selectRow(self.table.rowCount() - 1)
+        self.changed.emit()
+
+    def remove_selected(self) -> None:
+        rows = sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True)
+        if not rows:
+            return
+        for row in rows:
+            self.table.removeRow(row)
+        self.changed.emit()
+
+    # -- rows ---------------------------------------------------------------
+
+    def _append(self, clamp: dict[str, Any]) -> None:
+        # Silent while the row is built. ``setItem`` emits ``itemChanged``
+        # before the cell widgets exist, and a listener that read the table
+        # then would find a row with a name and no position.
+        was_loading = self._loading
+        self._loading = True
+        try:
+            self._build_row(clamp)
+        finally:
+            self._loading = was_loading
+
+    def _build_row(self, clamp: dict[str, Any]) -> None:
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+
+        position = list(clamp.get("position", [0.0, 0.0, 0.0]))
+        while len(position) < 3:
+            position.append(0.0)
+
+        name = QtWidgets.QTableWidgetItem(str(clamp.get("name", "")))
+        # Keep the original entry, so a key this panel does not show -- and a
+        # key a later version adds -- is not dropped by passing through here.
+        name.setData(QtCore.Qt.UserRole, dict(clamp))
+        self.table.setItem(row, 0, name)
+
+        for column, value, limit in (
+            (1, position[0], 20000.0),
+            (2, position[1], 20000.0),
+            (3, position[2], 20000.0),
+        ):
+            self.table.setCellWidget(row, column, self._make_spin(-limit, limit, float(value)))
+
+        combo = QtWidgets.QComboBox()
+        for label, vector in _APPROACHES:
+            combo.addItem(label, vector)
+        approach = tuple(float(v) for v in clamp.get("approach", [0.0, 0.0, 1.0]))
+        index = next((i for i, (_, v) in enumerate(_APPROACHES) if _same(v, approach)), -1)
+        if index < 0:
+            combo.addItem(f"{approach}", approach)
+            index = combo.count() - 1
+        combo.setCurrentIndex(index)
+        combo.currentIndexChanged.connect(lambda _=0: self._touched())
+        combo.setToolTip("Which way the clamp arm comes from. The torch is kept out of it.")
+        self.table.setCellWidget(row, 4, combo)
+
+        self.table.setCellWidget(
+            row, 5, self._make_spin(0.0, 1000.0, float(clamp.get("clearance_mm", 40.0)))
+        )
+        self.table.setCellWidget(
+            row, 6, self._make_spin(0.0, 2000.0, float(clamp.get("height_mm", 60.0)))
+        )
+
+        check = QtWidgets.QCheckBox()
+        check.setChecked(bool(clamp.get("retractable", False)))
+        check.setToolTip("Ticked when the clamp can be opened part-way through the cycle.")
+        check.toggled.connect(lambda _=False: self._touched())
+        holder = QtWidgets.QWidget()
+        box = QtWidgets.QHBoxLayout(holder)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.addWidget(check)
+        box.setAlignment(QtCore.Qt.AlignCenter)
+        self.table.setCellWidget(row, 7, holder)
+
+    def _make_spin(self, low: float, high: float, value: float) -> QtWidgets.QDoubleSpinBox:
+        box = _spin(low, high, value, 10.0, 0)
+        box.setSuffix(" mm")
+        box.valueChanged.connect(lambda _=0.0: self._touched())
+        return box
+
+    def _spin(self, row: int, column: int) -> QtWidgets.QDoubleSpinBox:
+        return self.table.cellWidget(row, column)
+
+    def _combo(self, row: int, column: int) -> QtWidgets.QComboBox:
+        return self.table.cellWidget(row, column)
+
+    def _check(self, row: int, column: int) -> QtWidgets.QCheckBox:
+        return self.table.cellWidget(row, column).findChild(QtWidgets.QCheckBox)
+
+    def _touched(self) -> None:
+        if not self._loading:
+            self.changed.emit()
+
+    def _on_item_changed(self, _item: QtWidgets.QTableWidgetItem) -> None:
+        self._touched()
+
+
+def _same(a, b, tol: float = 1e-6) -> bool:
+    if len(a) != len(b):
+        return False
+    return all(abs(float(x) - float(y)) <= tol for x, y in zip(a, b, strict=True))
+
+
+def _separator() -> QtWidgets.QFrame:
+    line = QtWidgets.QFrame()
+    line.setFrameShape(QtWidgets.QFrame.HLine)
+    line.setFrameShadow(QtWidgets.QFrame.Sunken)
+    return line
+
+
+def _slug(text: str) -> str:
+    """A filename-safe cell name, since the name becomes ``<name>.yaml``."""
+    kept = [c if (c.isalnum() or c in "-_") else "_" for c in text.strip().lower()]
+    return "".join(kept).strip("_")
 
 
 # ---------------------------------------------------------------------------

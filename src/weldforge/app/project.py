@@ -25,6 +25,12 @@ ones traced by hand -- which are selected, the welding procedure for each with
 any hand edits, the positioner settings, and the generated programs with a
 record of where they were sent.
 
+The cell goes inside it too, for the same reason the CAD does. A project that
+names its cell and looks it up in a folder opens on the machine PC with
+whatever bench happens to be installed there -- silently, because it still
+opens. So the bench someone measured, and the 3-D model of it they imported,
+travel with the job.
+
 Not saved: the planned trajectories. They are large, they are derived, and
 they are only valid for the robot calibration of the day they were made.
 Re-planning takes seconds and is the safer default; a stale trajectory that
@@ -33,6 +39,7 @@ loads without complaint is a trap.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import tempfile
@@ -69,14 +76,25 @@ __all__ = [
     "save_project",
     "load_project",
     "RecentFiles",
+    "attach_bench",
+    "clear_bench",
+    "cell_for",
+    "materialise_bench",
+    "attach_obstacle",
+    "remove_obstacle",
 ]
 
 #: Bumped when the on-disk shape changes incompatibly. Readers refuse a
 #: higher major version rather than guessing.
-FORMAT_VERSION = 1
+# 2 added setup.cell_config and the embedded bench model, so a cell the
+# operator measured and a bench they imported travel with the project instead
+# of being looked up by name in a folder that may not be on the next machine.
+FORMAT_VERSION = 2
 PROJECT_SUFFIX = ".weldforge"
 
 _PART_NAME = "part"
+_BENCH_NAME = "bench"
+_OBSTACLE_DIR = "obstacles"
 _PROJECT_JSON = "project.json"
 _PROGRAM_DIR = "programs"
 
@@ -344,6 +362,22 @@ class Project:
     part_filename: str = ""
     cell_name: str = "bench_cell"
     cell: WeldCell | None = None
+    #: The cell's own description, in the dictionary form the YAML holds. This
+    #: is what the cell editor changes and what the project file carries, so a
+    #: bench measured on this shop floor survives being opened anywhere else.
+    #: ``None`` means "whatever ``cell_name`` resolves to", which is how every
+    #: project written before this existed behaves.
+    cell_config: dict[str, Any] | None = None
+    #: The imported bench model, embedded for the same reason the CAD is: a
+    #: project that opens without its bench is a project that looks like it
+    #: worked.
+    bench_bytes: bytes | None = None
+    bench_filename: str = ""
+    #: Obstacles imported as 3-D models -- a welding jig, a positioner
+    #: housing -- keyed by obstacle id, embedded for the same reason the bench
+    #: is. The matching entry in ``cell_config["obstacles"]`` names the file.
+    obstacle_models: dict[str, bytes] = field(default_factory=dict)
+    obstacle_filenames: dict[str, str] = field(default_factory=dict)
     base_material: str = "S355"
     machine_profile: str = "generic_analog"
     wire_diameter_mm: float | None = None
@@ -464,6 +498,9 @@ class Project:
             "notes": self.notes,
             "setup": {
                 "cell": self.cell_name,
+                "cell_config": _clean_cell_config(self.cell_config),
+                "bench_filename": self.bench_filename,
+                "obstacle_filenames": dict(self.obstacle_filenames),
                 "base_material": self.base_material,
                 "machine_profile": self.machine_profile,
                 "wire_diameter_mm": self.wire_diameter_mm,
@@ -528,6 +565,11 @@ class Project:
             notes=str(data.get("notes", "")),
             part_filename=str((data.get("part") or {}).get("filename", "")),
             cell_name=str(setup.get("cell", "bench_cell")),
+            cell_config=_clean_cell_config(setup.get("cell_config")),
+            bench_filename=str(setup.get("bench_filename", "")),
+            obstacle_filenames={
+                str(k): str(v) for k, v in (setup.get("obstacle_filenames") or {}).items()
+            },
             base_material=str(setup.get("base_material", "S355")),
             machine_profile=str(setup.get("machine_profile", "generic_analog")),
             wire_diameter_mm=(
@@ -572,6 +614,192 @@ class Project:
 # ---------------------------------------------------------------------------
 
 
+def _clean_cell_config(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A cell description without the bookkeeping keys.
+
+    ``read_cell_config`` records the folder it came from under ``_dir`` so a
+    relative bench model resolves. That is true of the machine it was read on
+    and nowhere else, so it must not be written into a project.
+    """
+    if not raw:
+        return None
+    return {key: value for key, value in raw.items() if not str(key).startswith("_")}
+
+
+def cell_for(project: Project) -> WeldCell:
+    """Build the project's cell: its own description, or the named one.
+
+    The embedded description wins. A project that carries a bench someone
+    measured must not quietly fall back to a shipped example because the
+    folder of cells looks different on this machine.
+    """
+    from ..fixture import cell_from_config, load_cell
+
+    if not project.cell_config:
+        return load_cell(project.cell_name)
+
+    raw = dict(project.cell_config)
+    bench = materialise_bench(project)
+    if bench is not None:
+        raw.setdefault("fixture", {})
+        raw["fixture"] = {**raw["fixture"], "model": str(bench)}
+    if project.obstacle_models:
+        # Same treatment for imported obstacles: the bytes live in the
+        # project, the cell builder wants a path.
+        obstacles = []
+        for entry in raw.get("obstacles", []) or []:
+            entry = dict(entry)
+            path = _materialise_obstacle(project, str(entry.get("id", "")))
+            if path is not None:
+                entry["model"] = str(path)
+            obstacles.append(entry)
+        raw["obstacles"] = obstacles
+    return cell_from_config(raw, project.cell_name)
+
+
+def materialise_bench(project: Project) -> Path | None:
+    """Put the embedded bench model somewhere ``cell_from_config`` can read it.
+
+    Cached under the user's config folder rather than a temporary file,
+    because the cell is rebuilt every time the operator nudges a number and
+    re-reading a 40 MB STEP for each keystroke is not acceptable.
+    """
+    if project.bench_bytes is None:
+        return None
+    suffix = Path(project.bench_filename or "bench.stl").suffix or ".stl"
+    folder = Path.home() / ".config" / "weldforge" / "cache"
+    folder.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(project.bench_bytes).hexdigest()[:16]
+    target = folder / f"bench_{digest}{suffix}"
+    if not target.exists():
+        target.write_bytes(project.bench_bytes)
+    return target
+
+
+def attach_bench(project: Project, model_path: str | Path) -> dict[str, Any]:
+    """Import a 3-D model as the project's bench, and fit the box to it.
+
+    The box dimensions are what placement, collision checking and the URDF
+    export measure against, so they are derived from the model rather than
+    left for the operator to re-type: the top of the model is the support
+    plane, and its footprint is the area a part may sit on.
+    """
+    from ..fixture import bench_model_from_file, default_cell_config
+
+    source = Path(model_path)
+    vertices, _ = bench_model_from_file(source)
+    lo = vertices.min(axis=0)
+    hi = vertices.max(axis=0)
+
+    raw = dict(project.cell_config or default_cell_config())
+    fixture = dict(raw.get("fixture", {}) or {})
+    fixture["model"] = source.name
+    fixture["table_z_mm"] = float(hi[2])
+    fixture["table_size_mm"] = [float(hi[0] - lo[0]), float(hi[1] - lo[1])]
+    fixture["table_origin"] = [float((lo[0] + hi[0]) / 2.0), float((lo[1] + hi[1]) / 2.0), 0.0]
+    if not fixture.get("name"):
+        fixture["name"] = source.stem
+    raw["fixture"] = fixture
+
+    project.cell_config = raw
+    project.bench_bytes = source.read_bytes()
+    project.bench_filename = source.name
+    project.touch()
+    logger.info(
+        "bench %s: %.0f x %.0f mm, top at %.0f mm",
+        source.name,
+        fixture["table_size_mm"][0],
+        fixture["table_size_mm"][1],
+        fixture["table_z_mm"],
+    )
+    return raw
+
+
+def clear_bench(project: Project) -> dict[str, Any] | None:
+    """Drop the imported bench model, keeping the numbers that describe it."""
+    if project.cell_config:
+        fixture = dict(project.cell_config.get("fixture", {}) or {})
+        fixture.pop("model", None)
+        project.cell_config = {**project.cell_config, "fixture": fixture}
+    project.bench_bytes = None
+    project.bench_filename = ""
+    project.touch()
+    return project.cell_config
+
+
+def _materialise_obstacle(project: Project, obstacle_id: str) -> Path | None:
+    """Put one embedded obstacle model where ``cell_from_config`` can read it."""
+    payload = project.obstacle_models.get(obstacle_id)
+    if payload is None:
+        return None
+    suffix = Path(project.obstacle_filenames.get(obstacle_id, "x.stl")).suffix or ".stl"
+    folder = Path.home() / ".config" / "weldforge" / "cache"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / f"obstacle_{hashlib.sha256(payload).hexdigest()[:16]}{suffix}"
+    if not target.exists():
+        target.write_bytes(payload)
+    return target
+
+
+def attach_obstacle(
+    project: Project, model_path: str | Path, name: str = "", kind: str = "jig"
+) -> dict[str, Any]:
+    """Import a 3-D model as an obstacle in the cell -- a welding jig, say.
+
+    It lands with its footprint centred on the bench and its feet on the
+    floor, where it can be seen and dragged to where it really stands. It is
+    an obstacle in the full sense: the collision checker and the 3-D view
+    both read ``all_obstacles()``, so the torch is kept out of it from the
+    moment it is imported.
+    """
+    from ..fixture import default_cell_config
+
+    source = Path(model_path)
+    payload = source.read_bytes()
+    raw = dict(project.cell_config or default_cell_config())
+    obstacles = [dict(o) for o in (raw.get("obstacles") or [])]
+
+    stem = "".join(c if c.isalnum() else "_" for c in source.stem.lower()).strip("_") or "obstacle"
+    used = {str(o.get("id", "")) for o in obstacles}
+    obstacle_id, index = stem, 2
+    while obstacle_id in used:
+        obstacle_id, index = f"{stem}_{index}", index + 1
+
+    fixture = raw.get("fixture", {}) or {}
+    origin = list(fixture.get("table_origin", [1000.0, 0.0, 0.0]))
+    obstacles.append(
+        {
+            "id": obstacle_id,
+            "name": name or source.stem,
+            "kind": kind,
+            "model": source.name,
+            "centre": [float(origin[0]), float(origin[1]) if len(origin) > 1 else 0.0, 0.0],
+        }
+    )
+    raw["obstacles"] = obstacles
+    project.cell_config = raw
+    project.obstacle_models[obstacle_id] = payload
+    project.obstacle_filenames[obstacle_id] = source.name
+    project.touch()
+    logger.info("obstacle %s imported from %s", obstacle_id, source.name)
+    return obstacles[-1]
+
+
+def remove_obstacle(project: Project, obstacle_id: str) -> bool:
+    """Drop an obstacle, imported or not, from the cell description."""
+    if not project.cell_config:
+        return False
+    before = list(project.cell_config.get("obstacles") or [])
+    after = [o for o in before if str(o.get("id", "")) != obstacle_id]
+    if len(after) == len(before):
+        return False
+    project.cell_config = {**project.cell_config, "obstacles": after}
+    project.obstacle_models.pop(obstacle_id, None)
+    project.obstacle_filenames.pop(obstacle_id, None)
+    project.touch()
+    return True
+
+
 def save_project(project: Project, path: str | Path) -> Path:
     """Write the project to a ``.weldforge`` file.
 
@@ -591,6 +819,12 @@ def save_project(project: Project, path: str | Path) -> Path:
         if project.part_bytes is not None:
             suffix = Path(project.part_filename or "part.step").suffix or ".step"
             archive.writestr(f"{_PART_NAME}{suffix}", project.part_bytes)
+        if project.bench_bytes is not None:
+            suffix = Path(project.bench_filename or "bench.stl").suffix or ".stl"
+            archive.writestr(f"{_BENCH_NAME}{suffix}", project.bench_bytes)
+        for obstacle_id, payload_bytes in project.obstacle_models.items():
+            suffix = Path(project.obstacle_filenames.get(obstacle_id, "x.stl")).suffix or ".stl"
+            archive.writestr(f"{_OBSTACLE_DIR}/{obstacle_id}{suffix}", payload_bytes)
         for target, files in project.programs.items():
             for filename, text in files.items():
                 archive.writestr(f"{_PROGRAM_DIR}/{target}/{filename}", text)
@@ -630,6 +864,19 @@ def load_project(path: str | Path, load_cad: bool = True) -> Project:
             cad_names = [n for n in names if n.startswith(_PART_NAME + ".")]
             if cad_names:
                 project.part_bytes = archive.read(cad_names[0])
+
+            bench_names = [n for n in names if n.startswith(_BENCH_NAME + ".")]
+            if bench_names:
+                project.bench_bytes = archive.read(bench_names[0])
+                if not project.bench_filename:
+                    project.bench_filename = bench_names[0]
+
+            for name in names:
+                if not name.startswith(_OBSTACLE_DIR + "/"):
+                    continue
+                obstacle_id = Path(name).stem
+                project.obstacle_models[obstacle_id] = archive.read(name)
+                project.obstacle_filenames.setdefault(obstacle_id, Path(name).name)
 
             for name in names:
                 if not name.startswith(_PROGRAM_DIR + "/"):

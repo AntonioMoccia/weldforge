@@ -8,7 +8,13 @@ from .contact_detect import (
     detect_contact_seams,
     find_contacts,
 )
-from .detect import DetectionReport, DetectOptions, deduplicate_seams, detect_seams
+from .detect import (
+    DetectionReport,
+    DetectOptions,
+    deduplicate_seams,
+    detect_seams,
+    explain_no_seams,
+)
 from .dihedral import (
     FaceSide,
     InwardMode,
@@ -35,6 +41,7 @@ __all__ = [
     "DetectionReport",
     "detect_seams",
     "deduplicate_seams",
+    "explain_no_seams",
     "FaceSide",
     "InwardMode",
     "SeamGeometry",

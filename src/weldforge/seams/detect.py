@@ -80,6 +80,49 @@ class DetectionReport:
         }
 
 
+def explain_no_seams(part, report: DetectionReport, options=None) -> str:
+    """Why a detection run found nothing, in one sentence.
+
+    "0 seams" on its own reads as a broken importer, and the most common cause
+    is not a bug at all: a STEP exported as a single part rather than as the
+    assembly. Contact detection compares bodies, so with one body there is no
+    joint to find, however good the geometry is. The reason is read off the
+    report rather than guessed, so it can only ever say what actually
+    happened.
+    """
+    if report.n_after_chaining > 0 or report.n_topological or report.n_contact:
+        if report.n_dropped_short or report.n_dropped_confidence:
+            limits = ""
+            if options is not None:
+                limits = (
+                    f" (shorter than {options.min_length_mm:g} mm, or below "
+                    f"{options.min_confidence:g} confidence)"
+                )
+            return (
+                f"candidates were found but all were filtered out{limits}: "
+                f"{report.n_dropped_short} too short, "
+                f"{report.n_dropped_confidence} too uncertain"
+            )
+        return "candidates were found but none survived chaining"
+
+    if len(part.solids) <= 1:
+        return (
+            f"{part.name} is a single body, so there is no joint between parts to "
+            "detect. Export the assembly from your CAD seat as STEP -- one body per "
+            "part -- or trace the weld line by hand"
+        )
+    if part.metadata.get("geometry_kind") == "mesh":
+        return (
+            "no contact or edge pair qualified. This is a mesh, where a facet normal "
+            "cannot tell 90.0 degrees from 89.3; import STEP for exact geometry"
+        )
+    return (
+        f"no contact or edge pair qualified across {len(part.solids)} bodies. "
+        "Check that the bodies actually touch in the model, or trace the weld line "
+        "by hand"
+    )
+
+
 # ---------------------------------------------------------------------------
 # de-duplication
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ install with nothing but the core dependencies.
 .. code-block:: text
 
     weldforge info                       what this installation can do
+    weldforge doctor part.step           why an import failed, with the traceback
     weldforge seams part.step            recognise seams and print them
     weldforge wps part.step              seams plus a welding procedure sheet
     weldforge plan part.step -o out/     full plan, report and robot programs
@@ -97,11 +98,83 @@ def cmd_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Report the installation, and optionally try to import one CAD file.
+
+    This is the command to reach for when an import fails in the studio: the
+    studio is a GUI entry point with no console, so the traceback that
+    explains the failure only ever reaches the log file. Here it is printed.
+    """
+    import traceback
+
+    from .diagnostics import format_report, log_file, report, setup_logging
+
+    setup_logging("doctor", console=False)
+    data = report()
+    payload: dict[str, Any] = dict(data)
+    if not args.json:
+        print(format_report(data))
+
+    missing = [name for name, entry in data["packages"].items() if not entry["importable"]]
+    exit_code = 1 if missing else 0
+
+    if args.file:
+        from .cad import LoadOptions, load_part
+
+        path = Path(args.file)
+        if not args.json:
+            print(f"\nImporting {path}")
+        try:
+            part = load_part(path, LoadOptions(with_mesh=not args.no_mesh))
+        except Exception as exc:
+            detail = traceback.format_exc()
+            exit_code = 1
+            logging.getLogger("weldforge").error("doctor: import failed\n%s", detail)
+            payload["import"] = {
+                "file": str(path),
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "traceback": detail,
+            }
+            if not args.json:
+                print(f"\n  FAILED: {type(exc).__name__}: {exc}\n")
+                print(detail)
+                print(f"  Also written to {log_file('doctor')}")
+        else:
+            payload["import"] = {
+                "file": str(path),
+                "ok": True,
+                "name": part.name,
+                "geometry_kind": part.metadata.get("geometry_kind"),
+                "solids": len(part.solids),
+                "faces": len(part.faces),
+                "edges": len(part.edges),
+                "mass_kg": round(part.mass_kg, 3),
+                "bbox_mm": [round(float(v), 2) for v in part.bbox_size],
+                "load_seconds": part.metadata.get("load_seconds"),
+            }
+            if not args.json:
+                got = payload["import"]
+                size = got["bbox_mm"]
+                print(
+                    f"\n  OK: {got['solids']} solids, {got['faces']} faces, "
+                    f"{got['edges']} edges, {got['mass_kg']} kg, "
+                    f"{size[0]} x {size[1]} x {size[2]} mm "
+                    f"in {got['load_seconds']}s"
+                )
+
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+    elif missing:
+        print(f"\nMissing: {', '.join(missing)}  --  run  weldforge-setup install")
+    return exit_code
+
+
 def cmd_seams(args: argparse.Namespace) -> int:
     import numpy as np
 
     from .cad import LoadOptions, load_part
-    from .seams import DetectOptions, detect_seams
+    from .seams import DetectOptions, detect_seams, explain_no_seams
 
     part = load_part(args.file, LoadOptions(edge_spacing_mm=args.spacing))
     options = DetectOptions()
@@ -125,17 +198,19 @@ def cmd_seams(args: argparse.Namespace) -> int:
     ]
     headers = ["#", "joint", "len mm", "groove", "pos", "thk mm", "gap", "conf", ""]
 
-    text = "\n".join(
-        [
-            f"{part.name}: {len(part.solids)} solids, {len(part.faces)} faces, "
-            f"{part.mass_kg:.1f} kg",
-            "",
-            _table(rows, headers),
-            "",
-            f"  {len(seams)} seams, {sum(s.length_mm for s in seams):.0f} mm of weld "
-            f"in {report.seconds:.2f}s",
-        ]
-    )
+    lines = [
+        f"{part.name}: {len(part.solids)} solids, {len(part.faces)} faces, "
+        f"{part.mass_kg:.1f} kg",
+        "",
+        _table(rows, headers),
+        "",
+        f"  {len(seams)} seams, {sum(s.length_mm for s in seams):.0f} mm of weld "
+        f"in {report.seconds:.2f}s",
+    ]
+    if not seams:
+        # Zero seams with no reason given reads as a broken importer.
+        lines += ["", f"  why: {explain_no_seams(part, report, options)}"]
+    text = "\n".join(lines)
     payload = {
         "part": part.summary(),
         "detection": report.summary(),
@@ -386,6 +461,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     info = sub.add_parser("info", help="what this installation can do")
     info.set_defaults(func=cmd_info)
+
+    doctor = sub.add_parser(
+        "doctor",
+        help="check the installation, and try importing a file to see the real error",
+    )
+    doctor.add_argument(
+        "file", nargs="?", help="optional CAD file to attempt, printing the full traceback"
+    )
+    doctor.add_argument(
+        "--no-mesh", action="store_true", help="skip tessellation to isolate a reader failure"
+    )
+    doctor.set_defaults(func=cmd_doctor)
 
     def add_load_args(p: argparse.ArgumentParser) -> None:
         p.add_argument("file", help="STEP, IGES, BREP, STL, OBJ or PLY file")

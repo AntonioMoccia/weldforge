@@ -35,15 +35,61 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "LoadOptions",
+    "UnsupportedCadFormat",
     "load_part",
     "load_brep_part",
     "load_mesh_part",
     "BREP_SUFFIXES",
     "MESH_SUFFIXES",
+    "NATIVE_SUFFIXES",
+    "ALL_SUFFIXES",
 ]
+
+
+class UnsupportedCadFormat(ValueError):
+    """The file is not in a format this installation can read.
+
+    A ``ValueError`` subclass rather than a new exception root, so that every
+    caller already written to catch ``ValueError`` around ``load_part`` keeps
+    working. What it adds is a message an operator can act on without reading
+    the source.
+    """
 
 BREP_SUFFIXES = {".step", ".stp", ".iges", ".igs", ".brep"}
 MESH_SUFFIXES = {".stl", ".obj", ".ply", ".3mf", ".off", ".glb", ".gltf"}
+
+#: Native CAD formats, which are closed and readable only by the seat that
+#: wrote them. Recognising them by name is worth the dictionary: an operator
+#: who picks a .sldprt deserves "export it as STEP" rather than a list of
+#: extensions they have to diff against their own by eye.
+NATIVE_SUFFIXES: dict[str, str] = {
+    ".sldprt": "SolidWorks part",
+    ".sldasm": "SolidWorks assembly",
+    ".ipt": "Inventor part",
+    ".iam": "Inventor assembly",
+    ".catpart": "CATIA part",
+    ".catproduct": "CATIA product",
+    ".prt": "NX / Creo part",
+    ".asm": "Creo assembly",
+    ".par": "Solid Edge part",
+    ".psm": "Solid Edge sheet metal",
+    ".x_t": "Parasolid text",
+    ".x_b": "Parasolid binary",
+    ".xmt_txt": "Parasolid text",
+    ".xmt_bin": "Parasolid binary",
+    ".sat": "ACIS",
+    ".sab": "ACIS binary",
+    ".f3d": "Fusion 360 archive",
+    ".3dm": "Rhino",
+    ".dwg": "AutoCAD drawing",
+    ".dxf": "DXF drawing",
+    ".fcstd": "FreeCAD document",
+    ".jt": "JT",
+    ".3dxml": "3DXML",
+}
+
+#: Every extension the file dialog should offer.
+ALL_SUFFIXES = BREP_SUFFIXES | MESH_SUFFIXES
 
 
 class LoadOptions:
@@ -100,9 +146,21 @@ def load_part(
         return load_brep_part(path, options, name)
     if suffix in MESH_SUFFIXES:
         return load_mesh_part(path, name)
-    raise ValueError(
-        f"unsupported CAD format {suffix!r}; expected one of "
-        f"{sorted(BREP_SUFFIXES | MESH_SUFFIXES)}"
+    if suffix in NATIVE_SUFFIXES:
+        seat = NATIVE_SUFFIXES[suffix].split()[0]
+        raise UnsupportedCadFormat(
+            f"{path.name} is a {NATIVE_SUFFIXES[suffix]} file -- an unsupported, closed "
+            f"format that only {seat} itself can read.\n\n"
+            "In your CAD seat use File > Save as (or Export) and pick STEP "
+            "(AP214 or AP242, .step / .stp), then import that. STEP carries the exact "
+            "solid geometry, which is what seam recognition works on."
+        )
+    raise UnsupportedCadFormat(
+        f"unsupported CAD format {suffix or '(no extension)'!r}.\n\n"
+        f"Exact geometry : {', '.join(sorted(BREP_SUFFIXES))}\n"
+        f"Meshes         : {', '.join(sorted(MESH_SUFFIXES))}\n\n"
+        "STEP is the format to ask for: every CAD system exports it, and it keeps "
+        "the solids, faces and edges that seam recognition needs."
     )
 
 
@@ -283,6 +341,17 @@ def _read_solid_names(backend: CadBackend, path: str) -> dict[str, str]:
         labels = seq_cls()
         shape_tool.GetFreeShapes(labels)
 
+        # OCCT 8 turned GetComponents into a static, so the bound method is
+        # gone. Resolve whichever form this binding has, and call it with the
+        # same (root, children) arguments either way.
+        static_components = getattr(type(shape_tool), "GetComponents_s", None)
+        if static_components is not None:
+            def get_components(root: Any, children: Any) -> None:
+                static_components(root, children)
+        else:
+            def get_components(root: Any, children: Any) -> None:
+                shape_tool.GetComponents(root, children)
+
         get_id = getattr(name_cls, "GetID_s", None) or name_cls.GetID
 
         def label_name(label: Any) -> str:
@@ -296,7 +365,7 @@ def _read_solid_names(backend: CadBackend, path: str) -> dict[str, str]:
         for i in range(1, labels.Length() + 1):
             root = labels.Value(i)
             children = seq_cls()
-            shape_tool.GetComponents(root, children)
+            get_components(root, children)
             if children.Length() == 0:
                 out[f"solid_{index}"] = label_name(root)
                 index += 1

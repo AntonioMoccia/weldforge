@@ -24,6 +24,25 @@ requires_cad = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _isolated_cell_library(tmp_path_factory):
+    """Keep the operator's own saved cells out of the test run.
+
+    ``available_cells`` deliberately includes the cells someone built in the
+    application, which live in their home directory. A test that walks that
+    list would otherwise load whatever bench the developer last saved -- slow,
+    and failing for reasons that have nothing to do with the code.
+    """
+    folder = tmp_path_factory.mktemp("cells")
+    previous = os.environ.get("WELDFORGE_CELLS_DIR")
+    os.environ["WELDFORGE_CELLS_DIR"] = str(folder)
+    yield folder
+    if previous is None:
+        os.environ.pop("WELDFORGE_CELLS_DIR", None)
+    else:
+        os.environ["WELDFORGE_CELLS_DIR"] = previous
+
+
 # ---------------------------------------------------------------------------
 # OCCT construction helpers
 # ---------------------------------------------------------------------------
@@ -238,18 +257,15 @@ def company_step() -> Path | None:
     bonus signal, never a requirement, because the repository must not depend
     on a part that cannot be published with it.
     """
+    # Only ever the named file. Guessing -- globbing the folder above the
+    # repository for any STEP -- picked up whatever else happened to be
+    # sitting there, and then failed assertions written for a different part
+    # as though the importer were broken.
     from_environment = os.environ.get("WELDFORGE_TEST_PART")
-    if from_environment:
-        candidate = Path(from_environment).expanduser()
-        return candidate if candidate.exists() else None
-
-    # Otherwise the folder above the repository, which is where the file sits
-    # during development.
-    parent = Path(__file__).resolve().parents[2]
-    return next(
-        (f for pattern in ("*.stp", "*.step") for f in sorted(parent.glob(pattern))),
-        None,
-    )
+    if not from_environment:
+        return None
+    candidate = Path(from_environment).expanduser()
+    return candidate if candidate.exists() else None
 
 
 # ---------------------------------------------------------------------------

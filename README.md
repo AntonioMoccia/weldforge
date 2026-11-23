@@ -90,12 +90,32 @@ feed fixes the current through the synergic line, and the current fixes the
 voltage. Nothing is chosen twice. The test suite checks the identity holds on
 every pass of every procedure it generates.
 
+**Running a cell? Read [docs/manuale-operativo.md](docs/manuale-operativo.md)**
+(Italian) — connecting the ROS 2 cell, executing a weld on the robot, changing
+the arm and the power source, and where the safety interlocks are.
+
 **New here? Read [QUICKSTART.md](QUICKSTART.md)** — three ways to start it,
 with the commands.
 
 ---
 
 ## Install
+
+One command, from a fresh checkout, with nothing but a system Python:
+
+```bat
+weldforge.cmd                 :: Windows
+./weldforge.sh                # macOS, Linux
+```
+
+It creates `.venv`, installs every extra, builds the documentation into
+`docs/_build/`, builds standalone executables into `dist/`, then starts the
+studio. A stage that cannot run is reported and the others still run. Later
+invocations skip the install unless `pyproject.toml` changed, so it starts in a
+second. `weldforge.cmd --help` lists the stages; `weldforge.cmd run` only
+starts it.
+
+By hand, if you would rather:
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -120,6 +140,37 @@ between the two bindings.
 
 ---
 
+## Language
+
+The desktop application starts in **Italian** — it is built for an Italian
+shop floor, and an operator should not have to find a menu in a language they
+struggle with in order to change the language. **Help ▸ Language** switches it
+and the choice is remembered; `WELDFORGE_LANGUAGE=en` pins it for every
+account on a machine. The command line, the REST API and the log stay in
+English.
+
+Source strings are English and a catalogue is a flat JSON file keyed by them,
+so [`data/i18n/it.json`](data/i18n/it.json) reads as a glossary. A string with
+no entry falls through to the English, which means a half-finished translation
+degrades to a readable mixture rather than to blanks. One mechanism covers
+everything, including the modules that are deliberately free of Qt — see
+[`src/weldforge/i18n.py`](src/weldforge/i18n.py).
+
+---
+
+## Drawing the robot
+
+The arm is a tube through the joint origins unless the robot carries link
+geometry: a data sheet gives link lengths, not shape. Drop one mesh per link
+into `data/robots/meshes/<folder>/` and add a `visual:` block to that robot's
+YAML — any format the CAD importer reads. Vendor and ROS meshes are modelled
+in the vendor's link frames rather than the modified-DH frames used here, so
+each link usually needs an `xyz`/`rpy_deg` offset set once by comparing the
+two. None of it affects reach, limits or collision checking. See
+[`data/robots/meshes/README.md`](data/robots/meshes/README.md).
+
+---
+
 ## Use it
 
 ### The desktop application
@@ -133,6 +184,8 @@ right along the job:
 
 | | |
 |---|---|
+| **Describe the cell** | Bench length, width and surface height, where its centre sits relative to the robot, its rated load, and the robot's own base height and yaw. Clamps are a table: position, which way the arm comes from, clearance radius, height, and whether it opens mid-cycle — the torch is kept out of a cylinder around each one and placement scores a pose on how clear the seams are of them. `Ctrl+B` imports a STEP or STL of the real bench: its top becomes the support plane, its footprint the area a part may sit on, and the bench numbers then move the model rather than a stand-in box. Save the cell under a name and the next job starts from it — and every project carries its own cell and bench model, so one opened on another machine has the right bench instead of a shipped example. |
+| **Move it by hand** | Press `4` and drag the bench, a clamp or an obstacle in the viewport. The panel's numbers follow the drag and the drag follows the numbers: both edit the same cell. Dragging runs in the horizontal plane, because height is a tape measurement and a bench dragged into the floor describes nothing. |
 | **Import CAD** | STEP, IGES, BREP or a mesh. The part appears on the cell's bench. |
 | **Place the part** | Drop it on the table, snap it into the jig's 3-2-1 datums, nudge it by hand, or let the placement search find the pose that presents the most seams downhand. Lock it when you have measured it on the real bench. |
 | **Detect the seams** | Contact detection and topological detection together. Each seam shows its joint type, length, groove angle, welding position, plate gauges and the detector's confidence. Switch off the ones you do not want. |

@@ -30,8 +30,25 @@ sim = ["manifold3d>=2.3", "rtree>=1.2", "shapely>=2.0"]
 # The desktop application. VTK does the 3-D view and the picking; PySide6 the
 # window. Both ship as wheels on every platform the application targets.
 studio = ["PySide6>=6.6", "vtk>=9.3"]
-dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.5", "mypy>=1.10"]
-all = ["weldforge[cad,api,sim,studio,dev]"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    # fastapi.testclient refuses to import without an HTTP client, so the API
+    # tests cannot even be collected otherwise. Starlette 1.x asks for httpx2;
+    # older ones for httpx, hence both.
+    "httpx2>=0.1; python_version >= '3.10'",
+    "httpx>=0.27",
+]
+# The documentation build. pdoc renders the API reference from the docstrings
+# with no configuration to maintain; markdown renders the hand-written pages
+# and is optional -- without it they are shown unrendered rather than missing.
+docs = ["pdoc>=14.0", "markdown>=3.5"]
+# Standalone executables. PyInstaller support for a new Python release lags it
+# by months, which is why the packaging stage is allowed to fail on its own.
+build = ["pyinstaller>=6.6"]
+all = ["weldforge[cad,api,sim,studio,dev,docs,build]"]
 
 [project.scripts]
 weldforge = "weldforge.cli:main"
@@ -43,7 +60,16 @@ weldforge-studio = "weldforge.app:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-weldforge = ["../../data/**/*.yaml"]
+# Not only YAML: the language catalogues are JSON and the robot link geometry
+# is mesh files. Listing just *.yaml shipped a build whose window could not be
+# translated and whose robots had no shape.
+weldforge = [
+    "../../data/**/*.yaml",
+    "../../data/**/*.json",
+    "../../data/**/*.stl",
+    "../../data/**/*.step",
+    "../../data/**/*.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -61,6 +87,12 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "NPY"]
 ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# The bootstrap script runs on whatever Python the machine already has, which
+# may predate the project's floor -- so its version check is not redundant,
+# whatever target-version says. Refusing with a sentence beats a traceback.
+"tools/bootstrap.py" = ["UP036"]
 
 [tool.mypy]
 python_version = "3.10"

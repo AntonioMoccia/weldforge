@@ -15,6 +15,14 @@ dist/
 .coverage
 htmlcov/
 
+# Generated documentation: rebuilt from the docstrings and the Markdown by
+# `weldforge.cmd docs`, so a committed copy would only ever go stale.
+docs/_build/
+
+# .NET build output from the SOLIDWORKS add-in
+plugins/solidworks/**/obj/
+plugins/solidworks/**/bin/
+
 # ROS 2 / colcon
 ros2_ws/build/
 ros2_ws/install/
@@ -35,6 +43,10 @@ ros2_ws/log/
 *.x_t
 *.x_b
 *_preview.html
+
+# ...except a robot's own link geometry, which is part of the application:
+# without it every arm is drawn as a stick figure.
+!data/robots/meshes/**
 
 # Working directory: CAD goes in, robot programs come out. Both are job data.
 work/*

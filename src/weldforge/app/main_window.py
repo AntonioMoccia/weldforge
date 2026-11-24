@@ -1436,7 +1436,11 @@ class MainWindow(QtWidgets.QMainWindow):
             options.procedure.leg_thickness_ratio = project.leg_thickness_ratio
             # The operator placed the part, so the search must not undo that.
             options.do_placement = not project.placement_locked
-            job = plan_from_part(project.part, project.cell, options, robot)
+            # The seams the operator settled on: the ones they traced by
+            # hand included, the ones they switched off left out.
+            job = plan_from_part(
+                project.part, project.cell, options, robot, seams=project.selected_seams
+            )
             if project.placement_locked and job.placement is not None:
                 job.placement.pose = project.placement
             return job

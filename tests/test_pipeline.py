@@ -17,6 +17,7 @@ from weldforge.collide import scene_from_cell
 from weldforge.fixture import cell_robot, default_cell, load_cell
 from weldforge.plan import PlanOptions, plan_from_part, plan_job
 from weldforge.post import PostOptions, available_targets, get_postprocessor
+from weldforge.seams import DetectOptions, detect_seams
 from weldforge.sim import SimOptions, move_duration_s, simulate
 
 pytestmark = pytest.mark.needs_cad
@@ -464,3 +465,47 @@ def test_postprocessor_can_emit_unreachable_stations_on_request(tee_job):
         point.comment = "unreachable (120 mm short)"
     result = get_postprocessor("rapid", PostOptions(skip_unreachable=False)).generate(job)
     assert result.n_skipped == 0
+
+
+# ---------------------------------------------------------------------------
+# the seams the operator settled on
+# ---------------------------------------------------------------------------
+
+
+@requires_cad
+def test_the_planner_welds_the_seams_it_is_given(tee_assembly_step):
+    """A caller that knows what to weld must not have it re-detected away.
+
+    The studio lets an operator trace a joint by hand and switch detected ones
+    off. Both were discarded: the planner re-ran detection from the geometry,
+    so a hand-traced joint on a single-body part came back as "no weld seams
+    were recognised" and switching a seam off changed nothing about the plan.
+    """
+    from weldforge.cad import load_part
+
+    part = load_part(tee_assembly_step)
+    found, _ = detect_seams(part, DetectOptions())
+    assert len(found) >= 2, "the tee assembly has more than one seam to choose from"
+
+    chosen = [found[0]]
+    job = plan_from_part(part, load_cell("bench_cell"), fast_options(), seams=chosen)
+
+    assert [s.id for s in job.seams] == [chosen[0].id]
+    assert job.metadata.get("seams_given") == 1
+    assert "no weld seams were recognised" not in job.report.errors
+    assert set(job.procedures) == {chosen[0].id}, "one procedure, for the seam asked for"
+    # Detection must not have run at all: it would have cost time and
+    # overwritten the choice.
+    assert "detection" not in job.metadata
+
+
+@requires_cad
+def test_an_empty_seam_list_is_not_the_same_as_no_list(tee_assembly_step):
+    """"Weld nothing" is an answer; it must not fall back to detecting."""
+    from weldforge.cad import load_part
+
+    job = plan_from_part(load_part(tee_assembly_step), load_cell("bench_cell"), seams=[])
+
+    assert job.seams == []
+    assert "no weld seams were recognised" in job.report.errors
+    assert "detection" not in job.metadata

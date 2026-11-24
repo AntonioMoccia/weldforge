@@ -44,7 +44,7 @@ from ..collide import scene_from_cell
 from ..fixture import PlacementOptions, cell_robot, default_cell, find_placement
 from ..fixture.positioner import PositionerOptions, solve_positioner
 from ..kin import RobotModel
-from ..model import Part, WeldCell, WeldJob
+from ..model import Part, Seam, WeldCell, WeldJob
 from ..path import PathOptions, build_job_paths
 from ..seams import DetectOptions, detect_seams
 from ..sim import SimOptions, simulate
@@ -110,8 +110,17 @@ def plan_from_part(
     cell: WeldCell | None = None,
     options: PlanOptions | None = None,
     robot: RobotModel | None = None,
+    seams: list[Seam] | None = None,
 ) -> WeldJob:
-    """Run the pipeline on an already-loaded part."""
+    """Run the pipeline on an already-loaded part.
+
+    *seams* plans exactly those and skips detection. This is what an
+    application passes: the seams the operator settled on, which include the
+    ones they traced by hand and exclude the ones they switched off. Without
+    it the planner re-detected from the geometry and quietly discarded both --
+    a hand-traced joint on a single-body part came back as "no weld seams were
+    recognised", and switching a seam off changed nothing about the plan.
+    """
     opts = options or PlanOptions()
     work_cell = cell if cell is not None else default_cell()
     arm = robot if robot is not None else cell_robot(work_cell)
@@ -125,7 +134,12 @@ def plan_from_part(
     timings: dict[str, float] = {}
 
     # --- seams --------------------------------------------------------------
-    if opts.do_detect:
+    if seams is not None:
+        # The caller already knows what is to be welded. Detection would
+        # overwrite it.
+        job.seams = list(seams)
+        job.metadata["seams_given"] = len(job.seams)
+    elif opts.do_detect:
         t0 = time.perf_counter()
         seams, detect_report = detect_seams(part, opts.detect)
         timings["detect_s"] = round(time.perf_counter() - t0, 3)
